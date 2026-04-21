@@ -610,6 +610,77 @@ func TestSessionGetEmitsRequestExtensions(t *testing.T) {
 	}
 }
 
+func TestGetWithContextCancelClosesReplies(t *testing.T) {
+	router := newMockRouter(t)
+	defer router.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	sess, err := Open(ctx, NewConfig().WithEndpoint("tcp/"+router.Addr()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+
+	getCtx, cancelGet := context.WithCancel(context.Background())
+	ke, _ := NewKeyExpr("demo/test/**")
+	replies, err := sess.GetWithContext(getCtx, ke, nil)
+	if err != nil {
+		t.Fatalf("GetWithContext: %v", err)
+	}
+
+	// Wait for the REQUEST to hit the router (but don't reply).
+	select {
+	case <-router.requests:
+	case <-time.After(2 * time.Second):
+		t.Fatal("router did not observe REQUEST")
+	}
+
+	cancelGet()
+	select {
+	case _, ok := <-replies:
+		if ok {
+			t.Error("expected closed replies channel after ctx cancel")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("replies channel not closed after ctx cancel")
+	}
+}
+
+func TestGetTimeoutClosesReplies(t *testing.T) {
+	router := newMockRouter(t)
+	defer router.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	sess, err := Open(ctx, NewConfig().WithEndpoint("tcp/"+router.Addr()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+
+	ke, _ := NewKeyExpr("demo/test/**")
+	replies, err := sess.Get(ke, &GetOptions{Timeout: 150 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	select {
+	case <-router.requests:
+	case <-time.After(2 * time.Second):
+		t.Fatal("router did not observe REQUEST")
+	}
+
+	select {
+	case _, ok := <-replies:
+		if ok {
+			t.Error("expected closed replies channel after timeout")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("replies channel not closed after Timeout expired")
+	}
+}
+
 func TestDeclareLivelinessTokenEmitsDAndU(t *testing.T) {
 	router := newMockRouter(t)
 	defer router.Close()

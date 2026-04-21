@@ -1,6 +1,7 @@
 package zenoh
 
 import (
+	"context"
 	"time"
 
 	"github.com/shirou/zenoh-go-client/internal/codec"
@@ -94,15 +95,28 @@ const (
 
 // Get sends a REQUEST addressed to keyExpr and returns a channel that
 // yields each Reply until RESPONSE_FINAL (at which point the channel
-// closes). Reply consolidation is currently not applied on the client
-// side; the router performs routing-level consolidation via the mode
-// advertised in the REQUEST.
+// closes). Equivalent to GetWithContext(context.Background(), …).
+//
+// Reply consolidation is not applied on the client side; the router
+// performs routing-level consolidation via the mode advertised in the
+// REQUEST.
 func (s *Session) Get(keyExpr KeyExpr, opts *GetOptions) (<-chan Reply, error) {
+	return s.GetWithContext(context.Background(), keyExpr, opts)
+}
+
+// GetWithContext is Get with a caller-supplied context. Cancelling ctx
+// closes the reply channel on the next reply boundary. opts.Timeout is
+// additionally enforced locally as a deadline — a laggy router cannot leak
+// the Get forever.
+func (s *Session) GetWithContext(ctx context.Context, keyExpr KeyExpr, opts *GetOptions) (<-chan Reply, error) {
 	if s.closed.Load() {
 		return nil, ErrSessionClosed
 	}
 	if keyExpr.IsZero() {
 		return nil, ErrInvalidKeyExpr
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	reqID := s.inner.IDs().AllocRequestID()
@@ -115,6 +129,7 @@ func (s *Session) Get(keyExpr KeyExpr, opts *GetOptions) (<-chan Reply, error) {
 	// Build and send REQUEST.
 	body := &wire.QueryBody{}
 	var exts []codec.Extension
+	var timeout time.Duration
 	if opts != nil {
 		if opts.HasConsolidation {
 			cm := wire.ConsolidationMode(opts.Consolidation)
@@ -132,6 +147,7 @@ func (s *Session) Get(keyExpr KeyExpr, opts *GetOptions) (<-chan Reply, error) {
 			// "unset", so only emit the Timeout extension when we have at
 			// least 1 ms to carry.
 			exts = append(exts, wire.TimeoutExt(uint64(ms)))
+			timeout = opts.Timeout
 		}
 	}
 	req := &wire.Request{
@@ -146,14 +162,54 @@ func (s *Session) Get(keyExpr KeyExpr, opts *GetOptions) (<-chan Reply, error) {
 	}
 
 	// Spawn a translator goroutine: internal InboundReply → public Reply.
+	// A finaliser goroutine races ctx.Done and the Timeout deadline against
+	// RESPONSE_FINAL, cancelling the Get when either fires first. The
+	// translator always exits cleanly because CancelGet closes inboundCh.
 	out := make(chan Reply, bufSize)
+	translatorExited := make(chan struct{})
+	if ctx.Done() != nil || timeout > 0 {
+		go s.runGetCancel(ctx, timeout, reqID, translatorExited)
+	}
 	go func() {
 		defer close(out)
+		defer close(translatorExited)
 		for raw := range inboundCh {
-			out <- buildPublicReply(raw)
+			// Respect ctx cancellation even if the caller stopped reading
+			// from out — otherwise we leak the translator goroutine.
+			select {
+			case out <- buildPublicReply(raw):
+			case <-ctx.Done():
+				return
+			}
 		}
 	}()
 	return out, nil
+}
+
+// runGetCancel waits for ctx cancellation, a timeout expiry, or the Get to
+// terminate naturally (translatorExited closed). When ctx/timeout fires
+// first, it calls CancelGet so the translator exits and the public reply
+// channel closes.
+func (s *Session) runGetCancel(ctx context.Context, timeout time.Duration, reqID uint32, translatorExited <-chan struct{}) {
+	var timer *time.Timer
+	var timerC <-chan time.Time
+	if timeout > 0 {
+		timer = time.NewTimer(timeout)
+		timerC = timer.C
+	}
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+	select {
+	case <-ctx.Done():
+		s.inner.CancelGet(reqID)
+	case <-timerC:
+		s.inner.CancelGet(reqID)
+	case <-translatorExited:
+		// Translator already exited; nothing to cancel.
+	}
 }
 
 func buildPublicReply(raw session.InboundReply) Reply {

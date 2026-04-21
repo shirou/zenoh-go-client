@@ -17,15 +17,17 @@ import (
 // as a responder, then exposes a loop that reads DECLARE messages, records
 // them, and can inject PUSHes back to the client.
 type mockRouter struct {
-	t         *testing.T
-	ln        net.Listener
-	conn      net.Conn
-	declared  chan declaredSubscriber
-	declaredQ chan declaredQueryable
-	requests  chan inboundRequest
-	responses chan inboundResponse
-	injectCh  chan []byte // framed network-msg bytes to send (wrapped in FRAME)
-	closed    chan struct{}
+	t          *testing.T
+	ln         net.Listener
+	conn       net.Conn
+	declared   chan declaredSubscriber
+	declaredQ  chan declaredQueryable
+	declaredT  chan declaredToken
+	undeclared chan undeclaredEntity
+	requests   chan inboundRequest
+	responses  chan inboundResponse
+	injectCh   chan []byte // framed network-msg bytes to send (wrapped in FRAME)
+	closed     chan struct{}
 }
 
 type declaredSubscriber struct {
@@ -36,6 +38,17 @@ type declaredSubscriber struct {
 type declaredQueryable struct {
 	id  uint32
 	key string
+}
+
+type declaredToken struct {
+	id  uint32
+	key string
+}
+
+type undeclaredEntity struct {
+	kind byte // wire.IDUndeclareSubscriber / Queryable / Token
+	id   uint32
+	key  string
 }
 
 type inboundRequest struct {
@@ -58,14 +71,16 @@ func newMockRouter(t *testing.T) *mockRouter {
 		t.Fatal(err)
 	}
 	m := &mockRouter{
-		t:         t,
-		ln:        ln,
-		declared:  make(chan declaredSubscriber, 8),
-		declaredQ: make(chan declaredQueryable, 8),
-		requests:  make(chan inboundRequest, 8),
-		responses: make(chan inboundResponse, 8),
-		injectCh:  make(chan []byte, 8),
-		closed:    make(chan struct{}),
+		t:          t,
+		ln:         ln,
+		declared:   make(chan declaredSubscriber, 8),
+		declaredQ:  make(chan declaredQueryable, 8),
+		declaredT:  make(chan declaredToken, 8),
+		undeclared: make(chan undeclaredEntity, 8),
+		requests:   make(chan inboundRequest, 8),
+		responses:  make(chan inboundResponse, 8),
+		injectCh:   make(chan []byte, 8),
+		closed:     make(chan struct{}),
 	}
 	go m.serve()
 	return m
@@ -232,13 +247,18 @@ func (m *mockRouter) processFrameBody(body []byte) {
 			if err != nil {
 				return
 			}
-			if entity, ok := d.Body.(*wire.DeclareEntity); ok {
-				switch entity.Kind {
+			switch body := d.Body.(type) {
+			case *wire.DeclareEntity:
+				switch body.Kind {
 				case wire.IDDeclareSubscriber:
-					m.declared <- declaredSubscriber{id: entity.EntityID, key: entity.KeyExpr.Suffix}
+					m.declared <- declaredSubscriber{id: body.EntityID, key: body.KeyExpr.Suffix}
 				case wire.IDDeclareQueryable:
-					m.declaredQ <- declaredQueryable{id: entity.EntityID, key: entity.KeyExpr.Suffix}
+					m.declaredQ <- declaredQueryable{id: body.EntityID, key: body.KeyExpr.Suffix}
+				case wire.IDDeclareToken:
+					m.declaredT <- declaredToken{id: body.EntityID, key: body.KeyExpr.Suffix}
 				}
+			case *wire.UndeclareEntity:
+				m.undeclared <- undeclaredEntity{kind: body.Kind, id: body.EntityID, key: body.WireExpr.Suffix}
 			}
 		case wire.IDNetworkRequest:
 			req, err := wire.DecodeRequest(r, h)
@@ -528,6 +548,62 @@ func TestDeclareQueryableRespondsToRequest(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("router did not see RESPONSE within 2s")
+	}
+}
+
+func TestDeclareLivelinessTokenEmitsDAndU(t *testing.T) {
+	router := newMockRouter(t)
+	defer router.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cfg := NewConfig().WithEndpoint("tcp/" + router.Addr())
+	sess, err := Open(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+
+	ke, _ := NewKeyExpr("group1/alpha")
+	tok, err := sess.Liveliness().DeclareToken(ke, nil)
+	if err != nil {
+		t.Fatalf("DeclareToken: %v", err)
+	}
+
+	select {
+	case d := <-router.declaredT:
+		if d.key != "group1/alpha" {
+			t.Errorf("D_TOKEN key=%q, want group1/alpha", d.key)
+		}
+		if d.id == 0 {
+			t.Errorf("D_TOKEN id=0; expected a freshly allocated id")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("router did not observe D_TOKEN within 2s")
+	}
+
+	tok.Drop()
+	select {
+	case u := <-router.undeclared:
+		if u.kind != wire.IDUndeclareToken {
+			t.Errorf("undeclared kind=%#x, want IDUndeclareToken=%#x", u.kind, wire.IDUndeclareToken)
+		}
+		if u.key != "group1/alpha" {
+			t.Errorf("U_TOKEN key=%q, want group1/alpha", u.key)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("router did not observe U_TOKEN within 2s")
+	}
+
+	// Idempotency: a second Drop must not emit another U_TOKEN. 500ms is
+	// well beyond the sub-millisecond enqueue path but short enough to keep
+	// the test fast; the atomic guard inside Drop means the window is
+	// really "did any goroutine mis-handle the CAS," not wall-clock.
+	tok.Drop()
+	select {
+	case u := <-router.undeclared:
+		t.Errorf("unexpected second U_* after Drop: %+v", u)
+	case <-time.After(500 * time.Millisecond):
 	}
 }
 

@@ -375,6 +375,56 @@ func TestGoGetPyQueryable(t *testing.T) {
 	}
 }
 
+// TestGoLivelinessPyGet: Go declares a liveliness token, Python liveliness.get sees it.
+func TestGoLivelinessPyGet(t *testing.T) {
+	requireZenohd(t)
+
+	const (
+		tokenKey = "interop/live/alpha"
+		getKey   = "interop/live/**"
+	)
+
+	session := openGoSession(t)
+	defer session.Close()
+
+	ke, err := zenoh.NewKeyExpr(tokenKey)
+	if err != nil {
+		t.Fatalf("NewKeyExpr: %v", err)
+	}
+	tok, err := session.Liveliness().DeclareToken(ke, nil)
+	if err != nil {
+		t.Fatalf("DeclareToken: %v", err)
+	}
+	defer tok.Drop()
+
+	// Router needs a moment to propagate D_TOKEN before the Python get lands.
+	time.Sleep(200 * time.Millisecond)
+
+	get := startPython(t, "python_liveliness_get.py", "--key", getKey)
+	defer get.close(t)
+	get.waitFor(t, readyMarker, readyTimeout)
+
+	var keys []string
+	for {
+		line := get.readLine(t, ioTimeout)
+		if line == doneMarker {
+			break
+		}
+		rec, _ := decodeRecord(t, line)
+		keys = append(keys, rec.Key)
+	}
+	found := false
+	for _, k := range keys {
+		if k == tokenKey {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("liveliness get returned %v, want one entry %q", keys, tokenKey)
+	}
+}
+
 // TestPyGetGoQueryable: Python sends Get; Go queryable replies.
 func TestPyGetGoQueryable(t *testing.T) {
 	requireZenohd(t)

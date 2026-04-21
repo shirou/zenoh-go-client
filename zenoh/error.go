@@ -38,6 +38,7 @@ var (
 	ErrPayloadTooLarge    = ZError{Code: -4, Msg: "payload too large"}
 	ErrAllEndpointsFailed = ZError{Code: -5, Msg: "all endpoints failed"}
 	ErrSessionClosed      = ZError{Code: -6, Msg: "session is closed"}
+	ErrInvalidKeyExpr     = ZError{Code: -7, Msg: "invalid or zero-value KeyExpr"}
 	ErrSessionNotReady    = ZError{Code: -10, Msg: "session not ready"}
 )
 

@@ -58,9 +58,55 @@ func writerLoop(
 			if err := handleItem(item, batcher, link); err != nil {
 				logger.Warn("writer: link write failed, draining outQ", "err", err)
 				writeDead = true
+				continue
+			}
+			// Coalesce: opportunistically drain items already queued, then
+			// flush. Bursts batch together; idle single messages still
+			// reach the wire promptly.
+			var closed bool
+			writeDead, closed = drainAvailable(outQ, batcher, link, logger, writeDead)
+			if closed {
+				return
 			}
 		case <-closing:
 			return
+		}
+	}
+}
+
+// drainAvailable non-blockingly consumes items already sitting in outQ,
+// forwarding each through handleItem. Returns (writeDead, queueClosed):
+// queueClosed=true means the caller should exit; writeDead propagates the
+// "link write failed" latch.
+func drainAvailable(
+	outQ <-chan OutboundItem,
+	batcher *transport.Batcher,
+	link transport.Link,
+	logger *slog.Logger,
+	writeDead bool,
+) (dead, queueClosed bool) {
+	for {
+		select {
+		case item, ok := <-outQ:
+			if !ok {
+				_ = batcher.FlushAll()
+				return writeDead, true
+			}
+			if writeDead {
+				continue
+			}
+			if err := handleItem(item, batcher, link); err != nil {
+				logger.Warn("writer: link write failed, draining outQ", "err", err)
+				writeDead = true
+			}
+		default:
+			if !writeDead {
+				if err := batcher.FlushAll(); err != nil {
+					logger.Warn("writer: link flush failed", "err", err)
+					writeDead = true
+				}
+			}
+			return writeDead, false
 		}
 	}
 }

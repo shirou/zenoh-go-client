@@ -20,6 +20,11 @@ type Session struct {
 
 	// logger is the session-scoped logger. Tests override via OptionLogger.
 	logger *slog.Logger
+
+	// subscriber registry. Lazily initialised on first use because most
+	// code paths don't need it (tests that only exercise lifecycle).
+	subsOnce sync.Once
+	subs     *subscribers
 }
 
 // Option configures a Session at construction time.

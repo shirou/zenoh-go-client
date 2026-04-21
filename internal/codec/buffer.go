@@ -28,6 +28,16 @@ func NewWriter(capacity int) *Writer {
 	return &Writer{buf: make([]byte, 0, capacity)}
 }
 
+// WriterFromSlice adopts an existing slice as the writer's backing buffer.
+// Useful for hot-path writers that want to reuse a caller-owned scratch
+// buffer between encodes without allocating.
+//
+// The caller should truncate the slice to length zero first if it wants a
+// fresh write; WriterFromSlice does not clear.
+func WriterFromSlice(buf []byte) *Writer {
+	return &Writer{buf: buf}
+}
+
 // Bytes returns the accumulated bytes.
 //
 // The returned slice aliases the Writer's internal buffer. It remains valid

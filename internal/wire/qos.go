@@ -19,6 +19,11 @@ package wire
 // Higher bytes are reserved in the current spec; the encoder places the
 // whole payload into the low byte and leaves upper bytes at zero.
 
+// ExtIDQoS is the network/transport extension ID for the QoS extension.
+// Used as Unit in INIT/OPEN (negotiation) and as Z64 on FRAME/PUSH/etc.
+// (per-message priority / congestion control bits).
+const ExtIDQoS byte = 0x01
+
 // QoSPriority values (wire). Mirrors zenoh.Priority without creating a
 // dependency on the public package.
 type QoSPriority uint8

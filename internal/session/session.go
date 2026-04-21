@@ -14,7 +14,7 @@ type Session struct {
 
 	// Coordination primitives shared by all per-session goroutines.
 	closing chan struct{}  // closed by Close(); signals everyone to exit
-	wg      sync.WaitGroup // waits for every goroutine launched by RunLoops
+	wg      sync.WaitGroup // waits for every goroutine launched by Run
 
 	closeOnce sync.Once
 
@@ -34,8 +34,9 @@ func WithLogger(logger *slog.Logger) Option {
 	}
 }
 
-// New constructs a Session in the Init state. It does not start any goroutines
-// or perform any I/O; call RunLoops to launch the session's goroutines.
+// New constructs a Session in the Init state. It does not start any
+// goroutines or perform any I/O; call BeginHandshake then Run to attach a
+// live link.
 func New(opts ...Option) *Session {
 	s := &Session{
 		closing: make(chan struct{}),
@@ -78,7 +79,7 @@ func (s *Session) Close() error {
 		close(s.closing)
 	})
 	// wg.Wait is safe to call from multiple goroutines; it blocks until the
-	// goroutines launched by RunLoops have all returned.
+	// goroutines launched by Run have all returned.
 	s.wg.Wait()
 	return nil
 }

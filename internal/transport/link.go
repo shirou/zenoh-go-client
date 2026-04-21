@@ -5,7 +5,6 @@ package transport
 
 import (
 	"context"
-	"io"
 
 	"github.com/shirou/zenoh-go-client/internal/locator"
 )
@@ -20,7 +19,7 @@ import (
 // prepend a u16 LE length; datagram transports use the datagram boundary).
 type Link interface {
 	// ReadBatch fills buf with one framed batch and returns the number of
-	// bytes read. Returns [io.EOF] on clean close.
+	// bytes read. Returns io.EOF on clean close.
 	ReadBatch(buf []byte) (int, error)
 	// WriteBatch writes one framed batch.
 	WriteBatch(batch []byte) error
@@ -29,10 +28,6 @@ type Link interface {
 	// RemoteLocator returns the locator the link is connected to.
 	RemoteLocator() locator.Locator
 }
-
-// ErrLinkClosed is returned by Link.ReadBatch / WriteBatch after Close has
-// been called. Mirrors io.EOF conventions for framed reads.
-var ErrLinkClosed = io.ErrClosedPipe
 
 // Dialer establishes a new Link to the given locator.
 type Dialer interface {

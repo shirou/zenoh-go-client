@@ -19,12 +19,11 @@ func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
 }
 
-// TestSessionCloseNoLeak exercises the skeleton lifecycle:
-// construct a session, start its (currently empty) goroutine loops, close
-// it, and verify there are no leftover goroutines.
+// TestSessionCloseNoLeak: an unopened session (no Run) closes cleanly and
+// leaves no goroutines. Run-with-link scenarios are covered in run_test.go
+// and their goleak enforcement comes via TestMain above.
 func TestSessionCloseNoLeak(t *testing.T) {
 	s := New()
-	s.RunLoops()
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}

@@ -1,6 +1,7 @@
 package zenoh
 
 import (
+	"context"
 	goruntime "runtime"
 
 	"github.com/shirou/zenoh-go-client/internal/codec"
@@ -26,45 +27,73 @@ type PutOptions struct {
 }
 
 // Put publishes a PUT sample to keyExpr with the given payload. opts may
-// be nil to use defaults.
+// be nil to use defaults. Equivalent to PutWithContext(context.Background(), …).
 func (s *Session) Put(keyExpr KeyExpr, payload ZBytes, opts *PutOptions) error {
+	return s.PutWithContext(context.Background(), keyExpr, payload, opts)
+}
+
+// PutWithContext is Put with a caller-supplied context. The context is
+// checked before enqueue and, when the outbound queue is momentarily
+// full, while waiting for a slot — so a slow consumer cannot pin the
+// caller forever.
+func (s *Session) PutWithContext(ctx context.Context, keyExpr KeyExpr, payload ZBytes, opts *PutOptions) error {
 	if s.closed.Load() {
 		return ErrSessionClosed
 	}
 	if keyExpr.IsZero() {
 		return ErrInvalidKeyExpr
 	}
-	return s.enqueuePush(keyExpr, &wire.PutBody{
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.enqueuePush(ctx, keyExpr, &wire.PutBody{
 		Payload:  payload.unsafeBytes(),
 		Encoding: resolveEncoding(opts),
 	}, opts)
 }
 
-// Delete emits a DEL sample on keyExpr.
+// Delete emits a DEL sample on keyExpr. Equivalent to
+// DeleteWithContext(context.Background(), …).
 func (s *Session) Delete(keyExpr KeyExpr, opts *PutOptions) error {
+	return s.DeleteWithContext(context.Background(), keyExpr, opts)
+}
+
+// DeleteWithContext is Delete with a caller-supplied context.
+func (s *Session) DeleteWithContext(ctx context.Context, keyExpr KeyExpr, opts *PutOptions) error {
 	if s.closed.Load() {
 		return ErrSessionClosed
 	}
 	if keyExpr.IsZero() {
 		return ErrInvalidKeyExpr
 	}
-	return s.enqueuePush(keyExpr, &wire.DelBody{}, opts)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.enqueuePush(ctx, keyExpr, &wire.DelBody{}, opts)
 }
 
-func (s *Session) enqueuePush(keyExpr KeyExpr, body wire.PushBody, opts *PutOptions) error {
+func (s *Session) enqueuePush(ctx context.Context, keyExpr KeyExpr, body wire.PushBody, opts *PutOptions) error {
 	push := &wire.Push{KeyExpr: keyExpr.toWire(), Body: body}
 	prio, reliable, express := pushQoS(opts)
-	return s.enqueueNetwork(push, prio, reliable, express)
+	return s.enqueueNetwork(ctx, push, prio, reliable, express)
+}
+
+// enqueueControl emits a control-plane message on the Control priority
+// lane, reliable, non-express. Always uses a background ctx because
+// declare / tear-down / INTEREST sends must not be abandoned mid-wire;
+// cancellation is via Session.Close (propagated through LinkClosed).
+func (s *Session) enqueueControl(msg codec.Encoder) error {
+	return s.enqueueNetwork(context.Background(), msg, wire.QoSPriorityControl, true, false)
 }
 
 // enqueueNetwork encodes msg, wraps it in an OutboundMessage with the
 // given routing metadata, and sends it on the current runtime's writer
 // channel. Returns ErrSessionNotReady when the session is between
-// Runtimes (reconnect in progress) and ErrConnectionLost when the link
-// drops mid-send.
+// Runtimes (reconnect in progress), ErrConnectionLost when the link
+// drops mid-send, and ctx.Err() when ctx fires first.
 //
 // Common backbone for Put, Declare, and any other network-layer emission.
-func (s *Session) enqueueNetwork(msg codec.Encoder, prio wire.QoSPriority, reliable, express bool) (err error) {
+func (s *Session) enqueueNetwork(ctx context.Context, msg codec.Encoder, prio wire.QoSPriority, reliable, express bool) (err error) {
 	rt := s.snapshotRuntime()
 	if rt == nil {
 		return ErrSessionNotReady
@@ -98,6 +127,8 @@ func (s *Session) enqueueNetwork(msg codec.Encoder, prio wire.QoSPriority, relia
 		return nil
 	case <-rt.LinkClosed:
 		return ErrConnectionLost
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

@@ -106,8 +106,7 @@ func (s *Session) sendUndeclareSubscriber(id uint32, keyExpr KeyExpr) error {
 }
 
 func (s *Session) enqueueDeclare(msg *wire.Declare) error {
-	// DECLARE is control-plane: reliable channel, control priority, not express.
-	return s.enqueueNetwork(msg, wire.QoSPriorityControl, true, false)
+	return s.enqueueControl(msg)
 }
 
 // buildSample converts an internal PushSample to a public Sample. The

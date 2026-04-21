@@ -55,6 +55,15 @@ func (r Reply) Err() (ZBytes, Encoding, bool) {
 
 // GetOptions controls a Session.Get call.
 type GetOptions struct {
+	// Consolidation is the client-side reply consolidation mode.
+	// HasConsolidation=false falls back to ConsolidationAuto (= Latest):
+	// same-key replies are deduped and only the newest-timestamped one
+	// per key is delivered. Set HasConsolidation=true +
+	// ConsolidationNone to stream every reply in arrival order instead.
+	//
+	// Behaviour note: earlier pre-release builds of this library
+	// defaulted to streaming. Callers relying on that behaviour must now
+	// set HasConsolidation=true + ConsolidationNone explicitly.
 	Consolidation    ConsolidationMode
 	HasConsolidation bool
 	Parameters       string // optional query parameters string
@@ -81,6 +90,12 @@ type GetOptions struct {
 	// Buffer is the reply-channel capacity; 0 → default 16. Overflow drops
 	// replies silently.
 	Buffer int
+
+	// cancelCtx is an optional extra cancellation source merged into the
+	// Get's context. Kept unexported so only code built with
+	// zenoh_unstable can set it (via the CancellationToken helper in
+	// cancellation_token_unstable.go).
+	cancelCtx context.Context
 }
 
 // ConsolidationMode mirrors the zenoh-spec ConsolidationMode values.
@@ -97,9 +112,21 @@ const (
 // yields each Reply until RESPONSE_FINAL (at which point the channel
 // closes). Equivalent to GetWithContext(context.Background(), …).
 //
-// Reply consolidation is not applied on the client side; the router
-// performs routing-level consolidation via the mode advertised in the
-// REQUEST.
+// Client-side consolidation is applied in the translator according to
+// opts.Consolidation:
+//
+//	None           — stream every reply in arrival order.
+//	Monotonic      — per key, drop replies whose timestamp is ≤ the
+//	                 newest one already emitted for that key.
+//	Latest / Auto  — buffer every reply and, on RESPONSE_FINAL, emit at
+//	                 most one per key (the one with the largest timestamp;
+//	                 ties broken by arrival order). Error replies are
+//	                 flushed first in arrival order, then data replies in
+//	                 first-arrival order.
+//
+// The consolidation mode is ALSO advertised on the REQUEST so the router
+// can short-circuit where possible; the client-side pass is a safety net
+// for multi-source deployments and for modes the router elides.
 func (s *Session) Get(keyExpr KeyExpr, opts *GetOptions) (<-chan Reply, error) {
 	return s.GetWithContext(context.Background(), keyExpr, opts)
 }
@@ -117,6 +144,14 @@ func (s *Session) GetWithContext(ctx context.Context, keyExpr KeyExpr, opts *Get
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+
+	// Merge any unstable CancellationToken context so either source
+	// unblocks the Get. stop must be called when the Get finishes so the
+	// context.AfterFunc registration on the token doesn't leak.
+	stopCancelMerge := func() {}
+	if opts != nil && opts.cancelCtx != nil {
+		ctx, stopCancelMerge = mergeCancelContexts(ctx, opts.cancelCtx)
 	}
 
 	reqID := s.inner.IDs().AllocRequestID()
@@ -156,7 +191,8 @@ func (s *Session) GetWithContext(ctx context.Context, keyExpr KeyExpr, opts *Get
 		Extensions: exts,
 		Body:       body,
 	}
-	if err := s.enqueueNetwork(req, wire.QoSPriorityData, true, false); err != nil {
+	if err := s.enqueueNetwork(ctx, req, wire.QoSPriorityData, true, false); err != nil {
+		stopCancelMerge()
 		s.inner.CancelGet(reqID)
 		return nil, err
 	}
@@ -170,20 +206,159 @@ func (s *Session) GetWithContext(ctx context.Context, keyExpr KeyExpr, opts *Get
 	if ctx.Done() != nil || timeout > 0 {
 		go s.runGetCancel(ctx, timeout, reqID, translatorExited)
 	}
+	mode := ConsolidationAuto
+	if opts != nil && opts.HasConsolidation {
+		mode = opts.Consolidation
+	}
 	go func() {
-		defer close(out)
-		defer close(translatorExited)
-		for raw := range inboundCh {
-			// Respect ctx cancellation even if the caller stopped reading
-			// from out — otherwise we leak the translator goroutine.
-			select {
-			case out <- buildPublicReply(raw):
-			case <-ctx.Done():
-				return
-			}
-		}
+		defer stopCancelMerge()
+		runReplyTranslator(ctx, inboundCh, out, translatorExited, mode)
 	}()
 	return out, nil
+}
+
+// runReplyTranslator reads raw internal replies from inboundCh, applies
+// the consolidation mode, and forwards the resulting Replies to out.
+// Closes out (and translatorExited) on inboundCh close or ctx cancel.
+func runReplyTranslator(ctx context.Context, inboundCh <-chan session.InboundReply,
+	out chan<- Reply, translatorExited chan<- struct{}, mode ConsolidationMode) {
+	defer close(out)
+	defer close(translatorExited)
+
+	switch mode {
+	case ConsolidationNone:
+		runStreamTranslator(ctx, inboundCh, out)
+	case ConsolidationMonotonic:
+		runMonotonicTranslator(ctx, inboundCh, out)
+	default: // Auto / Latest
+		runLatestTranslator(ctx, inboundCh, out)
+	}
+}
+
+func runStreamTranslator(ctx context.Context, inboundCh <-chan session.InboundReply, out chan<- Reply) {
+	streamReplies(ctx, inboundCh, out, func(r Reply) (Reply, bool) { return r, true })
+}
+
+// runMonotonicTranslator emits a reply only when its timestamp is
+// strictly greater than the largest seen so far for that key. Replies
+// without a timestamp are always forwarded and never update the per-key
+// high-water mark — the "unknown" timestamp is not allowed to poison the
+// comparison. A source that never stamps therefore behaves like
+// ConsolidationNone, which matches zenoh-rust.
+func runMonotonicTranslator(ctx context.Context, inboundCh <-chan session.InboundReply, out chan<- Reply) {
+	latest := make(map[string]uint64)
+	streamReplies(ctx, inboundCh, out, func(reply Reply) (Reply, bool) {
+		if reply.hasSample {
+			if t, hasTS := reply.sample.TimeStamp(); hasTS {
+				ts := t.Time()
+				key := reply.keyExpr.inner.String()
+				if prev, seen := latest[key]; seen && ts <= prev {
+					return reply, false
+				}
+				latest[key] = ts
+			}
+		}
+		return reply, true
+	})
+}
+
+// streamReplies reads inbound replies, runs each through decide to get
+// the public Reply and a keep flag, and forwards accepted ones to out.
+// Exits cleanly on inboundCh close or ctx cancel.
+func streamReplies(ctx context.Context, inboundCh <-chan session.InboundReply,
+	out chan<- Reply, decide func(Reply) (Reply, bool)) {
+	for raw := range inboundCh {
+		reply, keep := decide(buildPublicReply(raw))
+		if !keep {
+			continue
+		}
+		select {
+		case out <- reply:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// runLatestTranslator buffers every reply and, once inboundCh closes,
+// emits one reply per key — the one whose timestamp is greatest (or the
+// last-arriving among those without a timestamp). Error replies are held
+// in a separate slice so they always surface intact; keying them on the
+// key-expression map would risk collisions with pathological keys.
+func runLatestTranslator(ctx context.Context, inboundCh <-chan session.InboundReply, out chan<- Reply) {
+	type entry struct {
+		reply Reply
+		ts    uint64
+		hasTS bool
+	}
+	buf := make(map[string]entry)
+	order := make([]string, 0, 8) // preserve first-insertion order for stable flush
+	var errReplies []Reply
+
+	take := func(raw session.InboundReply) {
+		reply := buildPublicReply(raw)
+		if !reply.hasSample {
+			errReplies = append(errReplies, reply)
+			return
+		}
+		key := reply.keyExpr.inner.String()
+		var ts uint64
+		var hasTS bool
+		if t, ok := reply.sample.TimeStamp(); ok {
+			ts, hasTS = t.Time(), true
+		}
+		if prev, seen := buf[key]; seen {
+			if hasTS && prev.hasTS && ts <= prev.ts {
+				return
+			}
+			// New entry wins (newer timestamp, or prev had no ts).
+			buf[key] = entry{reply: reply, ts: ts, hasTS: hasTS}
+			return
+		}
+		buf[key] = entry{reply: reply, ts: ts, hasTS: hasTS}
+		order = append(order, key)
+	}
+
+	for {
+		select {
+		case raw, ok := <-inboundCh:
+			if !ok {
+				// Final — flush errors first (arrival order), then
+				// data replies in first-insertion order.
+				for _, r := range errReplies {
+					select {
+					case out <- r:
+					case <-ctx.Done():
+						return
+					}
+				}
+				for _, k := range order {
+					select {
+					case out <- buf[k].reply:
+					case <-ctx.Done():
+						return
+					}
+				}
+				return
+			}
+			take(raw)
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// mergeCancelContexts returns a context cancelled when EITHER parent is
+// cancelled. The returned stop func releases the AfterFunc watcher and
+// cancels the merged context; both are idempotent, so it is safe to call
+// even after b has already fired (in which case cancel is a no-op).
+func mergeCancelContexts(a, b context.Context) (context.Context, func()) {
+	merged, cancel := context.WithCancel(a)
+	stopAfterFunc := context.AfterFunc(b, cancel)
+	return merged, func() {
+		stopAfterFunc()
+		cancel()
+	}
 }
 
 // runGetCancel waits for ctx cancellation, a timeout expiry, or the Get to

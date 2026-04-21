@@ -130,23 +130,45 @@ Runnable variants live under [`examples/`](examples/):
 
 ### Publish / Subscribe
 
-- `Session.Put`, `Session.Delete`, `Publisher.Put`, `Publisher.Delete`
+- `Session.Put` / `PutWithContext`, `Session.Delete` / `DeleteWithContext`,
+  `Publisher.Put`, `Publisher.Delete`
 - `DeclareSubscriber` with `Handler[T]`:
   - `Closure[T]` — dedicated dispatcher goroutine per subscriber
   - `FifoChannel[T]` — bounded channel, drop-on-full
   - `RingChannel[T]` — bounded channel, drop-oldest
 - Per-emission options: encoding, priority, congestion control (`Block` / `Drop`), express
 
+### Encoding
+
+- Full upstream catalogue of 53 predefined encodings — IDs mirror
+  zenoh-rust so the wire representation is identical
+  (`EncodingZenohBytes` / `EncodingTextPlain` / `EncodingApplicationJson` /
+  `EncodingImagePng` / `EncodingVideoH264` / …)
+- `Encoding.String()` / `NewEncodingFromString()` round-trip through the
+  canonical `"<prefix>;<schema>"` form (e.g. `text/plain;utf-8`)
+
 ### Query / Queryable
 
 - `Session.Get` (+ `GetWithContext`) with options:
-  - `ConsolidationMode` (Auto / None / Monotonic / Latest)
+  - `ConsolidationMode` (Auto / None / Monotonic / Latest) — **applied
+    client-side** in the translator:
+    - `None` streams every reply in arrival order
+    - `Monotonic` drops replies whose timestamp ≤ the per-key high-water mark
+    - `Latest` / `Auto` (default) buffers every reply and emits at most one
+      per key at `RESPONSE_FINAL`, picking the newest timestamp; error
+      replies are flushed first, then data replies in first-arrival order
+  - **Default changed** from "stream every reply" to `Auto` (= Latest).
+    Callers that want the old streaming behaviour must set
+    `HasConsolidation: true, Consolidation: ConsolidationNone`.
   - `QueryTarget` (BestMatching / All / AllComplete)
   - `Budget` (max replies)
   - `Timeout` (deadline, enforced client-side *and* advertised on the wire)
   - `Parameters` string
 - `DeclareQueryable` with `Complete` option
 - `Query.Reply` / `ReplyDel` / `ReplyErr`; `RESPONSE_FINAL` auto-emitted
+- `Session.DeclareQuerier` — emits `INTEREST[Mode=CurrentFuture, Q=1,
+  restricted=keyExpr]` so the router tracks matching queryables; successive
+  `Querier.Get` / `Querier.GetWithContext` inherit the querier's defaults
 
 ### Liveliness
 
@@ -158,8 +180,12 @@ Runnable variants live under [`examples/`](examples/):
 - `Open(ctx, cfg)` — ctx bounds the dial + handshake
 - `Session.GetWithContext(ctx, keyExpr, opts)` — ctx cancel closes the reply
   channel promptly; combined with `opts.Timeout` for hard deadlines
+- `Session.PutWithContext` / `DeleteWithContext` / `Querier.GetWithContext`
+  for symmetric ctx support on every blocking user-facing call
 - `CancellationToken` (behind `-tags zenoh_unstable`) — zenoh-rust-style
-  cancellation handle, convertible to a context
+  cancellation handle. Attach via
+  `opts := (&GetOptions{}).WithCancellation(tok)`; `tok.Cancel()` aborts the
+  Get whether or not the caller holds the ctx
 
 ### Testing
 
@@ -176,16 +202,14 @@ Runnable variants live under [`examples/`](examples/):
 
 Not yet implemented, in rough priority order:
 
-- **Liveliness Subscriber** and **Liveliness Get** on the Go side (both need
-  INTEREST send-path plumbing, see below)
+- **Liveliness Subscriber** and **Liveliness Get** on the Go side — the
+  INTEREST send-path infrastructure landed with the Querier, so these are
+  straightforward follow-ons
 - **Matching Listener** on publishers — notifications when subscribers
-  appear/disappear (needs INTEREST)
-- **Querier** type (`Session.DeclareQuerier` / `Querier.Get`) with INTEREST
+  appear/disappear (reuses the INTEREST plumbing)
 - **Scout** — UDP multicast SCOUT / HELLO discovery (byte-level codec is
   already written; UDP transport and scout state machine are not)
 - **KeyExpr aliasing** — `D_KEYEXPR` send side for smaller on-wire messages
-- **Full `Encoding` predefined constant set** — currently 7 / ~50; rest will
-  be ported from upstream
 - **`SourceInfo` extension** (behind unstable)
 - **Link / Transport info API** — inspect the current link (addr, stats)
 - **Full JSON5 Config parser** — today `Config` is a flat struct; JSON5 is
@@ -202,8 +226,6 @@ Not yet implemented, in rough priority order:
 - Benchmark suite
 - expvar / Prometheus metrics hooks
 - Router-side entity-level ACL support
-- Client-side Get consolidation (today the router handles consolidation;
-  local consolidation is a correctness/observability improvement)
 
 ## Running the interop suite
 

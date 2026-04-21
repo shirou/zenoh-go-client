@@ -42,6 +42,11 @@ type Session struct {
 	tokensMu sync.Mutex
 	tokens   map[uint32]KeyExpr
 
+	// queriers mirrors tokens: outbound INTEREST is not tracked inside
+	// inner/session so the zenoh layer owns the replay registry.
+	queriersMu sync.Mutex
+	queriers   map[uint32]*querierState
+
 	// userCtx is a context derived from UserCloseCh, lazily built and
 	// cached. Used by dialContext to cancel in-flight dials on Close.
 	userCtxOnce sync.Once
@@ -64,12 +69,13 @@ func Open(ctx context.Context, cfg Config) (*Session, error) {
 
 	inner := session.New()
 	s := &Session{
-		cfg:     cfg,
-		backoff: reconnectConfigFromUser(cfg),
-		inner:   inner,
-		zid:     zid,
-		done:    make(chan struct{}),
-		tokens:  make(map[uint32]KeyExpr),
+		cfg:      cfg,
+		backoff:  reconnectConfigFromUser(cfg),
+		inner:    inner,
+		zid:      zid,
+		done:     make(chan struct{}),
+		tokens:   make(map[uint32]KeyExpr),
+		queriers: make(map[uint32]*querierState),
 	}
 
 	rt, err := s.dialAndRun(ctx)
@@ -242,57 +248,63 @@ func (s *Session) userCloseCtx() context.Context {
 	return s.userCtx
 }
 
-// replayEntities re-emits D_SUBSCRIBER / D_QUERYABLE / D_TOKEN for every
-// entity that was live when the link dropped. Called once per successful
-// reconnect, before the session is handed back to the caller.
+// replayEntities re-emits D_SUBSCRIBER / D_QUERYABLE / D_TOKEN /
+// INTEREST for every entity that was live when the link dropped. Called
+// once per successful reconnect, before the session is handed back to
+// the caller.
 //
-// Snapshots the three registries into local slices first, then releases
-// the registry locks before issuing any send. Holding a registry lock
-// across a blocking enqueueNetwork would serialise DeclareSubscriber /
-// UnregisterSubscriber calls for the full duration of replay.
+// Each registry is snapshotted into a slice of replayEntry closures with
+// its own lock released before any send fires — holding a registry lock
+// across a blocking enqueueNetwork would serialise declare / undeclare
+// calls for the full duration of replay.
 func (s *Session) replayEntities() error {
-	type subEntry struct {
-		id uint32
-		ke intkeyexpr.KeyExpr
-	}
-	type qblEntry struct {
-		id       uint32
-		ke       intkeyexpr.KeyExpr
-		complete bool
-	}
-	var subs []subEntry
-	var qbls []qblEntry
+	var plan []replayEntry
+
 	s.inner.ForEachSubscriber(func(id uint32, ke intkeyexpr.KeyExpr) {
-		subs = append(subs, subEntry{id, ke})
+		k := KeyExpr{inner: ke}
+		plan = append(plan, replayEntry{id, "D_SUBSCRIBER", func() error {
+			return s.sendDeclareSubscriber(id, k)
+		}})
 	})
 	s.inner.ForEachQueryable(func(id uint32, ke intkeyexpr.KeyExpr, complete bool) {
-		qbls = append(qbls, qblEntry{id, ke, complete})
+		k := KeyExpr{inner: ke}
+		opts := &QueryableOptions{Complete: complete}
+		plan = append(plan, replayEntry{id, "D_QUERYABLE", func() error {
+			return s.sendDeclareQueryable(id, k, opts)
+		}})
 	})
 	s.tokensMu.Lock()
-	tokens := make(map[uint32]KeyExpr, len(s.tokens))
 	for id, ke := range s.tokens {
-		tokens[id] = ke
+		plan = append(plan, replayEntry{id, "D_TOKEN", func() error {
+			return s.sendDeclareToken(id, ke)
+		}})
 	}
 	s.tokensMu.Unlock()
+	s.queriersMu.Lock()
+	for id, q := range s.queriers {
+		ke := q.keyExpr
+		plan = append(plan, replayEntry{id, "INTEREST", func() error {
+			return s.sendQuerierInterest(id, ke)
+		}})
+	}
+	s.queriersMu.Unlock()
 
 	var errs []error
-	for _, e := range subs {
-		if err := s.sendDeclareSubscriber(e.id, KeyExpr{inner: e.ke}); err != nil {
-			errs = append(errs, fmt.Errorf("D_SUBSCRIBER id=%d: %w", e.id, err))
-		}
-	}
-	for _, e := range qbls {
-		opts := &QueryableOptions{Complete: e.complete}
-		if err := s.sendDeclareQueryable(e.id, KeyExpr{inner: e.ke}, opts); err != nil {
-			errs = append(errs, fmt.Errorf("D_QUERYABLE id=%d: %w", e.id, err))
-		}
-	}
-	for id, ke := range tokens {
-		if err := s.sendDeclareToken(id, ke); err != nil {
-			errs = append(errs, fmt.Errorf("D_TOKEN id=%d: %w", id, err))
+	for _, e := range plan {
+		if err := e.send(); err != nil {
+			errs = append(errs, fmt.Errorf("%s id=%d: %w", e.label, e.id, err))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// replayEntry is one item in the reconnect replay plan. The closure owns
+// whatever state (keyExpr, options) the specific send needs; the loop in
+// replayEntities stays uniform.
+type replayEntry struct {
+	id    uint32
+	label string
+	send  func() error
 }
 
 // sendFarewellClose enqueues a best-effort CLOSE frame. The outbound

@@ -1,6 +1,8 @@
 package zenoh
 
 import (
+	"context"
+
 	"github.com/shirou/zenoh-go-client/internal/session"
 	"github.com/shirou/zenoh-go-client/internal/wire"
 )
@@ -74,12 +76,15 @@ func (q *Query) ReplyErr(payload ZBytes, encoding *Encoding) error {
 }
 
 func (q *Query) sendResponse(keyExpr KeyExpr, body wire.ResponseBody) error {
+	// Control-plane use of context.Background(): the reply runs inside
+	// the queryable's dispatch callback and has no caller ctx; the
+	// runtime shuts down via Session.Close → LinkClosed.
 	res := &wire.Response{
 		RequestID: q.requestID,
 		KeyExpr:   keyExpr.toWire(),
 		Body:      body,
 	}
-	return q.session.enqueueNetwork(res, wire.QoSPriorityData, true, false)
+	return q.session.enqueueNetwork(context.Background(), res, wire.QoSPriorityData, true, false)
 }
 
 // sendFinal emits RESPONSE_FINAL for this query.
@@ -89,8 +94,10 @@ func (q *Query) sendResponse(keyExpr KeyExpr, body wire.ResponseBody) error {
 // different FRAME stream and it overtakes the replies, so the querier sees
 // "final without replies".
 func (q *Query) sendFinal() error {
+	// Same rationale as sendResponse: fires inside the dispatch callback
+	// after the handler returns, no caller ctx.
 	rf := &wire.ResponseFinal{RequestID: q.requestID}
-	return q.session.enqueueNetwork(rf, wire.QoSPriorityData, true, false)
+	return q.session.enqueueNetwork(context.Background(), rf, wire.QoSPriorityData, true, false)
 }
 
 func encodingFromOpts(opts *QueryReplyOptions) *wire.Encoding {

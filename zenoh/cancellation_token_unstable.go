@@ -55,3 +55,21 @@ func (t *CancellationToken) IsCancelled() bool {
 		return false
 	}
 }
+
+// WithCancellation attaches a CancellationToken to a GetOptions. Calling
+// t.Cancel() aborts the Get exactly as if the caller had cancelled its
+// own context; the two sources are merged so either one triggers
+// termination. Returns o for call-chaining.
+//
+// Mutates o in place. Reusing the same *GetOptions across multiple
+// Session.Get calls means every Get shares the same token — so
+// t.Cancel() aborts all of them. Usually the intended behaviour; if you
+// need per-Get tokens, allocate fresh GetOptions per call.
+//
+// Available only under the zenoh_unstable build tag — zenoh-rust exposes
+// this feature as `zenoh::ext::CancellationToken` and has the same
+// stability disclaimer.
+func (o *GetOptions) WithCancellation(t *CancellationToken) *GetOptions {
+	o.cancelCtx = t.Context(nil)
+	return o
+}

@@ -28,6 +28,7 @@ type mockRouter struct {
 	declaredQ  chan declaredQueryable
 	declaredT  chan declaredToken
 	undeclared chan undeclaredEntity
+	interests  chan observedInterest
 	requests   chan inboundRequest
 	responses  chan inboundResponse
 	injectCh   chan []byte // framed network-msg bytes to send (wrapped in FRAME)
@@ -69,6 +70,14 @@ type undeclaredEntity struct {
 	key  string
 }
 
+type observedInterest struct {
+	id     uint32
+	final  bool
+	mode   wire.InterestMode
+	filter wire.InterestFilter
+	key    string // empty when unrestricted
+}
+
 type inboundRequest struct {
 	requestID  uint32
 	key        string
@@ -96,6 +105,7 @@ func newMockRouter(t *testing.T) *mockRouter {
 		declaredQ:  make(chan declaredQueryable, 8),
 		declaredT:  make(chan declaredToken, 8),
 		undeclared: make(chan undeclaredEntity, 8),
+		interests:  make(chan observedInterest, 8),
 		requests:   make(chan inboundRequest, 8),
 		responses:  make(chan inboundResponse, 8),
 		injectCh:   make(chan []byte, 8),
@@ -298,6 +308,21 @@ func (m *mockRouter) processFrameBody(body []byte) {
 				parameters: paramsOf(req.Body),
 				extensions: req.Extensions,
 			}
+		case wire.IDNetworkInterest:
+			msg, err := wire.DecodeInterest(r, h)
+			if err != nil {
+				return
+			}
+			obs := observedInterest{
+				id:     msg.InterestID,
+				final:  msg.Mode == wire.InterestModeFinal,
+				mode:   msg.Mode,
+				filter: msg.Filter,
+			}
+			if msg.KeyExpr != nil {
+				obs.key = msg.KeyExpr.Suffix
+			}
+			m.interests <- obs
 		case wire.IDNetworkResponse:
 			res, err := wire.DecodeResponse(r, h)
 			if err != nil {
@@ -369,13 +394,26 @@ func (m *mockRouter) injectRequest(t *testing.T, requestID uint32, keyExpr, para
 	})
 }
 
-// injectReply simulates a RESPONSE with a PUT body.
+// injectReply simulates a RESPONSE with a PUT body. Equivalent to
+// injectReplyWithTS(..., 0).
 func (m *mockRouter) injectReply(t *testing.T, requestID uint32, keyExpr, payload string) {
 	t.Helper()
+	m.injectReplyWithTS(t, requestID, keyExpr, payload, 0)
+}
+
+// injectReplyWithTS simulates a RESPONSE with a PUT body. ntp64 > 0
+// attaches a Timestamp with that value; 0 omits the timestamp entirely
+// — consolidation tests that rely on ordering use non-zero values.
+func (m *mockRouter) injectReplyWithTS(t *testing.T, requestID uint32, keyExpr, payload string, ntp64 uint64) {
+	t.Helper()
+	put := &wire.PutBody{Payload: []byte(payload)}
+	if ntp64 > 0 {
+		put.Timestamp = &wire.Timestamp{NTP64: ntp64, ZID: wire.ZenohID{Bytes: []byte{1, 2}}}
+	}
 	m.inject(t, &wire.Response{
 		RequestID: requestID,
 		KeyExpr:   wire.WireExpr{Scope: 0, Suffix: keyExpr},
-		Body:      &wire.ReplyBody{Inner: &wire.PutBody{Payload: []byte(payload)}},
+		Body:      &wire.ReplyBody{Inner: put},
 	})
 }
 
@@ -492,7 +530,12 @@ func TestSessionGetReceivesReplies(t *testing.T) {
 	defer sess.Close()
 
 	ke, _ := NewKeyExpr("demo/get")
-	replyCh, err := sess.Get(ke, nil)
+	// Consolidation=None so both replies reach the caller verbatim
+	// (default is Auto=Latest, which dedupes same-key replies).
+	replyCh, err := sess.Get(ke, &GetOptions{
+		Consolidation:    ConsolidationNone,
+		HasConsolidation: true,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -882,6 +925,283 @@ func drainTokenDeclare(t *testing.T, router *mockRouter, wantKey string) uint32 
 		t.Fatalf("D_TOKEN %q not observed within 3s", wantKey)
 	}
 	return 0
+}
+
+// TestGetConsolidationLatest: four replies on two keys with increasing
+// timestamps; Latest should emit exactly the newest reply per key.
+func TestGetConsolidationLatest(t *testing.T) {
+	router := newMockRouter(t)
+	defer router.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	sess, err := Open(ctx, NewConfig().WithEndpoint("tcp/"+router.Addr()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+
+	ke, _ := NewKeyExpr("demo/latest/**")
+	replies, err := sess.Get(ke, &GetOptions{
+		Consolidation:    ConsolidationLatest,
+		HasConsolidation: true,
+	})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	var req inboundRequest
+	select {
+	case req = <-router.requests:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no REQUEST observed")
+	}
+
+	router.injectReplyWithTS(t, req.requestID, "demo/latest/a", "a-v1", 100)
+	router.injectReplyWithTS(t, req.requestID, "demo/latest/a", "a-v2", 300)
+	router.injectReplyWithTS(t, req.requestID, "demo/latest/a", "a-v3", 200) // out-of-order
+	router.injectReplyWithTS(t, req.requestID, "demo/latest/b", "b-v1", 150)
+	router.injectResponseFinal(t, req.requestID)
+
+	got := collectPayloads(t, replies, 2*time.Second)
+	want := map[string]bool{"a-v2": true, "b-v1": true}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want exactly %v", got, want)
+	}
+	for _, p := range got {
+		if !want[p] {
+			t.Errorf("unexpected payload %q (want subset of %v)", p, want)
+		}
+	}
+}
+
+// TestGetConsolidationMonotonic: replies are streamed in arrival order
+// except out-of-order ones are dropped.
+func TestGetConsolidationMonotonic(t *testing.T) {
+	router := newMockRouter(t)
+	defer router.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	sess, err := Open(ctx, NewConfig().WithEndpoint("tcp/"+router.Addr()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+
+	ke, _ := NewKeyExpr("demo/mono/**")
+	replies, err := sess.Get(ke, &GetOptions{
+		Consolidation:    ConsolidationMonotonic,
+		HasConsolidation: true,
+	})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	var req inboundRequest
+	select {
+	case req = <-router.requests:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no REQUEST observed")
+	}
+
+	router.injectReplyWithTS(t, req.requestID, "demo/mono/a", "a-v1", 100)
+	router.injectReplyWithTS(t, req.requestID, "demo/mono/a", "a-v2", 200) // accepted
+	router.injectReplyWithTS(t, req.requestID, "demo/mono/a", "a-stale", 150) // dropped
+	router.injectReplyWithTS(t, req.requestID, "demo/mono/a", "a-v3", 300)   // accepted
+	router.injectResponseFinal(t, req.requestID)
+
+	got := collectPayloads(t, replies, 2*time.Second)
+	want := []string{"a-v1", "a-v2", "a-v3"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want exactly %v (stale must be dropped)", got, want)
+	}
+	for i, p := range want {
+		if got[i] != p {
+			t.Errorf("got[%d] = %q, want %q", i, got[i], p)
+		}
+	}
+}
+
+// TestGetConsolidationMonotonicNoTimestamp: untimestamped replies must
+// be forwarded and must NOT poison the per-key high-water mark —
+// Monotonic degrades to None for sources that never stamp.
+func TestGetConsolidationMonotonicNoTimestamp(t *testing.T) {
+	router := newMockRouter(t)
+	defer router.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	sess, err := Open(ctx, NewConfig().WithEndpoint("tcp/"+router.Addr()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+
+	ke, _ := NewKeyExpr("demo/mono-nots/**")
+	replies, err := sess.Get(ke, &GetOptions{
+		Consolidation:    ConsolidationMonotonic,
+		HasConsolidation: true,
+	})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	var req inboundRequest
+	select {
+	case req = <-router.requests:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no REQUEST observed")
+	}
+
+	router.injectReply(t, req.requestID, "k", "a")               // no-ts — forward
+	router.injectReplyWithTS(t, req.requestID, "k", "b", 500)    // ts=500 — forward
+	router.injectReply(t, req.requestID, "k", "c")               // no-ts — forward
+	router.injectReplyWithTS(t, req.requestID, "k", "d", 300)    // ts=300 ≤ 500 — drop
+	router.injectResponseFinal(t, req.requestID)
+
+	got := collectPayloads(t, replies, 2*time.Second)
+	want := []string{"a", "b", "c"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i, p := range want {
+		if got[i] != p {
+			t.Errorf("got[%d] = %q, want %q", i, got[i], p)
+		}
+	}
+}
+
+// TestGetConsolidationNone: every reply reaches the caller, including
+// duplicates and out-of-order timestamps.
+func TestGetConsolidationNone(t *testing.T) {
+	router := newMockRouter(t)
+	defer router.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	sess, err := Open(ctx, NewConfig().WithEndpoint("tcp/"+router.Addr()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+
+	ke, _ := NewKeyExpr("demo/none/**")
+	replies, err := sess.Get(ke, &GetOptions{
+		Consolidation:    ConsolidationNone,
+		HasConsolidation: true,
+	})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	var req inboundRequest
+	select {
+	case req = <-router.requests:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no REQUEST observed")
+	}
+
+	router.injectReply(t, req.requestID, "k", "a")
+	router.injectReply(t, req.requestID, "k", "b")
+	router.injectReply(t, req.requestID, "k", "a") // duplicate — None must keep
+	router.injectResponseFinal(t, req.requestID)
+
+	got := collectPayloads(t, replies, 2*time.Second)
+	if got := len(got); got != 3 {
+		t.Fatalf("got %d replies, want 3", got)
+	}
+}
+
+func collectPayloads(t *testing.T, ch <-chan Reply, timeout time.Duration) []string {
+	t.Helper()
+	deadline := time.After(timeout)
+	var out []string
+	for {
+		select {
+		case r, ok := <-ch:
+			if !ok {
+				return out
+			}
+			if s, hasSample := r.Sample(); hasSample {
+				out = append(out, string(s.Payload().Bytes()))
+			}
+		case <-deadline:
+			t.Fatal("timeout collecting replies")
+			return out
+		}
+	}
+}
+
+func TestDeclareQuerierEmitsInterest(t *testing.T) {
+	router := newMockRouter(t)
+	defer router.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	sess, err := Open(ctx, NewConfig().WithEndpoint("tcp/"+router.Addr()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+
+	ke, _ := NewKeyExpr("demo/qr/**")
+	qr, err := sess.DeclareQuerier(ke, &QuerierOptions{
+		Target:    QueryTargetAll,
+		HasTarget: true,
+	})
+	if err != nil {
+		t.Fatalf("DeclareQuerier: %v", err)
+	}
+
+	// Observe INTEREST[CurrentFuture, Q=1, restricted=demo/qr/**].
+	select {
+	case obs := <-router.interests:
+		if obs.final {
+			t.Errorf("unexpected INTEREST Final")
+		}
+		if obs.mode != wire.InterestModeCurrentFuture {
+			t.Errorf("mode=%v, want CurrentFuture", obs.mode)
+		}
+		if !obs.filter.Queryables {
+			t.Errorf("filter.Queryables=false, want true")
+		}
+		if obs.key != "demo/qr/**" {
+			t.Errorf("INTEREST key=%q, want demo/qr/**", obs.key)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("INTEREST not observed within 2s")
+	}
+
+	// Querier.Get should produce a REQUEST that carries the inherited
+	// QueryTarget option.
+	replies, err := qr.Get(nil)
+	if err != nil {
+		t.Fatalf("Querier.Get: %v", err)
+	}
+	var reqID uint32
+	select {
+	case req := <-router.requests:
+		reqID = req.requestID
+		target := codec.FindExt(req.extensions, wire.ReqExtIDQueryTarget)
+		if target == nil || wire.QueryTarget(target.Z64) != wire.QueryTargetAll {
+			t.Errorf("QueryTarget ext = %+v, want QueryTargetAll", target)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("REQUEST not observed within 2s")
+	}
+	// Cleanly finish the Get so the translator goroutine exits.
+	router.injectResponseFinal(t, reqID)
+	<-replies
+
+	// Drop emits INTEREST Final with the same id.
+	qr.Drop()
+	select {
+	case obs := <-router.interests:
+		if !obs.final {
+			t.Errorf("expected INTEREST Final after Drop, got %+v", obs)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("INTEREST Final not observed within 2s")
+	}
 }
 
 func TestOpenFailsOnClosedEndpoint(t *testing.T) {

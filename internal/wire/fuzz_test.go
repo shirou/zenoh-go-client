@@ -186,3 +186,76 @@ func FuzzDecodeHello(f *testing.F) {
 		return err
 	})
 }
+
+func FuzzDecodeJoin(f *testing.F) {
+	seeds := []codec.Encoder{
+		&Join{Version: ProtoVersion, ZID: ZenohID{Bytes: []byte{9, 8, 7}}, WhatAmI: WhatAmIPeer, HasSizeInfo: true, Resolution: DefaultResolution, BatchSize: 8192, Lease: 10_000},
+		&Join{LeaseSeconds: true, Version: ProtoVersion, ZID: ZenohID{Bytes: []byte{1}}, WhatAmI: WhatAmIRouter},
+	}
+	fuzzDecode(f, seeds, IDTransportJoin, func(r *codec.Reader, h codec.Header) error {
+		_, err := DecodeJoin(r, h)
+		return err
+	})
+}
+
+// The remaining decoders are not gated by a header ID — they read directly
+// from a Reader positioned at their payload. Fuzz them by feeding raw
+// bytes into the decoder and asserting no panic.
+
+func FuzzDecodeEncoding(f *testing.F) {
+	seeds := []Encoding{
+		{ID: 0},
+		{ID: 4, Schema: "utf-8"},
+		{ID: 52, Schema: ""},
+	}
+	for _, e := range seeds {
+		w := codec.NewWriter(16)
+		if err := e.EncodeTo(w); err != nil {
+			f.Fatalf("seed encode: %v", err)
+		}
+		f.Add(w.Bytes())
+	}
+	f.Fuzz(func(t *testing.T, input []byte) {
+		r := codec.NewReader(input)
+		_, _ = DecodeEncoding(r)
+	})
+}
+
+func FuzzDecodeTimestamp(f *testing.F) {
+	seeds := []Timestamp{
+		{NTP64: 0, ZID: ZenohID{Bytes: []byte{1}}},
+		{NTP64: 1 << 40, ZID: ZenohID{Bytes: []byte{1, 2, 3, 4, 5, 6, 7, 8}}},
+	}
+	for _, ts := range seeds {
+		w := codec.NewWriter(16)
+		if err := ts.EncodeTo(w); err != nil {
+			f.Fatalf("seed encode: %v", err)
+		}
+		f.Add(w.Bytes())
+	}
+	f.Fuzz(func(t *testing.T, input []byte) {
+		r := codec.NewReader(input)
+		_, _ = DecodeTimestamp(r)
+	})
+}
+
+func FuzzDecodeWireExpr(f *testing.F) {
+	// Seeds: a named+scope=0 expr, and a named+scope=42 expr.
+	seeds := []WireExpr{
+		{Scope: 0, Suffix: "demo/**"},
+		{Scope: 42, Suffix: ""},
+		{Scope: 100, Suffix: "a/b/c"},
+	}
+	for _, ke := range seeds {
+		w := codec.NewWriter(16)
+		if err := ke.EncodeScope(w); err != nil {
+			f.Fatalf("seed encode: %v", err)
+		}
+		f.Add(w.Bytes())
+	}
+	// named=true so the suffix is read; mapping bit doesn't alter decoding shape.
+	f.Fuzz(func(t *testing.T, input []byte) {
+		r := codec.NewReader(input)
+		_, _ = DecodeWireExpr(r, true, false)
+	})
+}

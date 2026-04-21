@@ -183,10 +183,8 @@ func dispatchFrameBody(cfg ReaderConfig, body []byte) error {
 // laneKeyPriority extracts the QoS priority from a FRAME/FRAGMENT extension
 // chain. Falls back to the default Data priority if no QoS ext is present.
 func laneKeyPriority(exts []codec.Extension) uint8 {
-	for _, e := range exts {
-		if e.Header.ID == wire.ExtIDQoS && e.Header.Encoding == codec.ExtEncZ64 {
-			return uint8(wire.DecodeQoSZ64(e.Z64).Priority)
-		}
+	if e := codec.FindExt(exts, wire.ExtIDQoS); e != nil && e.Header.Encoding == codec.ExtEncZ64 {
+		return uint8(wire.DecodeQoSZ64(e.Z64).Priority)
 	}
 	return uint8(wire.QoSPriorityData)
 }

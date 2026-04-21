@@ -1,17 +1,33 @@
 package zenoh
 
 import (
+	"time"
+
+	"github.com/shirou/zenoh-go-client/internal/codec"
 	"github.com/shirou/zenoh-go-client/internal/session"
 	"github.com/shirou/zenoh-go-client/internal/wire"
+)
+
+// QueryTarget selects which matching queryables receive a Get. Wire values
+// match the spec (query.adoc §QueryTarget Extension).
+type QueryTarget uint8
+
+const (
+	QueryTargetBestMatching QueryTarget = 0x00 // default — nearest matching queryable
+	QueryTargetAll          QueryTarget = 0x01 // all matching queryables
+	QueryTargetAllComplete  QueryTarget = 0x02 // all matching queryables whose Complete flag is set
+
+	// QueryTargetDefault mirrors zenoh-go; kept for API parity.
+	QueryTargetDefault = QueryTargetBestMatching
 )
 
 // Reply is one response delivered to a Get caller. Either the Sample
 // accessor returns a data sample, or Err returns an error payload.
 type Reply struct {
-	keyExpr  KeyExpr
-	sample   Sample
+	keyExpr   KeyExpr
+	sample    Sample
 	hasSample bool
-	errBody  *wire.ErrBody
+	errBody   *wire.ErrBody
 }
 
 // KeyExpr returns the key expression the replier used.
@@ -38,12 +54,31 @@ func (r Reply) Err() (ZBytes, Encoding, bool) {
 
 // GetOptions controls a Session.Get call.
 type GetOptions struct {
-	Consolidation     ConsolidationMode
-	HasConsolidation  bool
-	Parameters        string  // optional query parameters string
+	Consolidation    ConsolidationMode
+	HasConsolidation bool
+	Parameters       string // optional query parameters string
+
+	// Target selects which matching queryables receive the query.
+	// HasTarget=false omits the QueryTarget extension and lets the router
+	// apply the spec default (BestMatching). Because the zero Target value
+	// is also BestMatching, callers who want that explicit must set
+	// HasTarget=true.
+	Target    QueryTarget
+	HasTarget bool
+
+	// Budget caps the number of replies the querier will accept; routers
+	// SHOULD stop forwarding further RESPONSE messages after the cap is
+	// reached. Zero = unlimited (extension omitted). Spec calls for a
+	// non-zero u32.
+	Budget uint32
+
+	// Timeout bounds how long the querier waits for replies. Zero = no
+	// querier-side limit (extension omitted); the router MAY still impose
+	// its own timeout.
+	Timeout time.Duration
+
 	// Buffer is the reply-channel capacity; 0 → default 16. Overflow drops
-	// replies silently (Budget extension support to propagate upstream is
-	// a Phase 6+ enhancement).
+	// replies silently.
 	Buffer int
 }
 
@@ -79,17 +114,31 @@ func (s *Session) Get(keyExpr KeyExpr, opts *GetOptions) (<-chan Reply, error) {
 
 	// Build and send REQUEST.
 	body := &wire.QueryBody{}
+	var exts []codec.Extension
 	if opts != nil {
 		if opts.HasConsolidation {
 			cm := wire.ConsolidationMode(opts.Consolidation)
 			body.Consolidation = &cm
 		}
 		body.Parameters = opts.Parameters
+		if opts.HasTarget {
+			exts = append(exts, wire.QueryTargetExt(wire.QueryTarget(opts.Target)))
+		}
+		if opts.Budget > 0 {
+			exts = append(exts, wire.BudgetExt(opts.Budget))
+		}
+		if ms := opts.Timeout.Milliseconds(); ms > 0 {
+			// Sub-millisecond durations would round to 0 and be confused with
+			// "unset", so only emit the Timeout extension when we have at
+			// least 1 ms to carry.
+			exts = append(exts, wire.TimeoutExt(uint64(ms)))
+		}
 	}
 	req := &wire.Request{
-		RequestID: reqID,
-		KeyExpr:   keyExpr.toWire(),
-		Body:      body,
+		RequestID:  reqID,
+		KeyExpr:    keyExpr.toWire(),
+		Extensions: exts,
+		Body:       body,
 	}
 	if err := s.enqueueNetwork(req, wire.QoSPriorityData, true, false); err != nil {
 		s.inner.CancelGet(reqID)

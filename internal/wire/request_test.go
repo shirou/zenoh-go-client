@@ -41,6 +41,38 @@ func TestRequestRoundtrip(t *testing.T) {
 	}
 }
 
+func TestRequestExtensionsRoundtrip(t *testing.T) {
+	orig := &Request{
+		RequestID: 7,
+		KeyExpr:   WireExpr{Scope: 0, Suffix: "demo/**"},
+		Extensions: []codec.Extension{
+			QueryTargetExt(QueryTargetAll),
+			BudgetExt(16),
+			TimeoutExt(5000),
+		},
+		Body: &QueryBody{},
+	}
+	w := codec.NewWriter(64)
+	if err := orig.EncodeTo(w); err != nil {
+		t.Fatal(err)
+	}
+	r := codec.NewReader(w.Bytes())
+	h, _ := r.DecodeHeader()
+	got, err := DecodeRequest(r, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e := codec.FindExt(got.Extensions, ReqExtIDQueryTarget); e == nil || QueryTarget(e.Z64) != QueryTargetAll {
+		t.Errorf("QueryTarget ext lost: %+v", e)
+	}
+	if e := codec.FindExt(got.Extensions, ReqExtIDBudget); e == nil || uint32(e.Z64) != 16 {
+		t.Errorf("Budget ext lost: %+v", e)
+	}
+	if e := codec.FindExt(got.Extensions, ReqExtIDTimeout); e == nil || e.Z64 != 5000 {
+		t.Errorf("Timeout ext lost: %+v", e)
+	}
+}
+
 func TestResponseReplyRoundtrip(t *testing.T) {
 	orig := &Response{
 		RequestID: 7,

@@ -101,6 +101,27 @@ type Extension struct {
 	ZBuf   []byte // valid when Header.Encoding == ExtEncZBuf
 }
 
+// NewZ64Ext builds a Z64-encoded extension with the given ID, M flag, and
+// body value. Keeps call sites out of the encoding/flag bookkeeping.
+func NewZ64Ext(id byte, mandatory bool, v uint64) Extension {
+	return Extension{
+		Header: ExtHeader{ID: id, Encoding: ExtEncZ64, Mandatory: mandatory},
+		Z64:    v,
+	}
+}
+
+// FindExt scans an extension chain for the first element whose ID matches
+// and returns a pointer into the slice, or nil. Callers that care about the
+// body encoding should check Header.Encoding before reading Z64 / ZBuf.
+func FindExt(exts []Extension, id byte) *Extension {
+	for i := range exts {
+		if exts[i].Header.ID == id {
+			return &exts[i]
+		}
+	}
+	return nil
+}
+
 // EncodeExtension writes an extension header + body. The caller sets
 // Extension.Header.More to indicate whether another extension follows.
 func (w *Writer) EncodeExtension(ext Extension) error {

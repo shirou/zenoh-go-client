@@ -52,9 +52,10 @@ type undeclaredEntity struct {
 }
 
 type inboundRequest struct {
-	requestID uint32
-	key       string
+	requestID  uint32
+	key        string
 	parameters string
+	extensions []codec.Extension
 }
 
 type inboundResponse struct {
@@ -269,6 +270,7 @@ func (m *mockRouter) processFrameBody(body []byte) {
 				requestID:  req.RequestID,
 				key:        req.KeyExpr.Suffix,
 				parameters: paramsOf(req.Body),
+				extensions: req.Extensions,
 			}
 		case wire.IDNetworkResponse:
 			res, err := wire.DecodeResponse(r, h)
@@ -548,6 +550,63 @@ func TestDeclareQueryableRespondsToRequest(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("router did not see RESPONSE within 2s")
+	}
+}
+
+func TestSessionGetEmitsRequestExtensions(t *testing.T) {
+	router := newMockRouter(t)
+	defer router.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	sess, err := Open(ctx, NewConfig().WithEndpoint("tcp/"+router.Addr()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+
+	ke, _ := NewKeyExpr("demo/test/**")
+	replies, err := sess.Get(ke, &GetOptions{
+		Target:    QueryTargetAll,
+		HasTarget: true,
+		Budget:    32,
+		Timeout:   2500 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	var reqID uint32
+	select {
+	case req := <-router.requests:
+		reqID = req.requestID
+		target := codec.FindExt(req.extensions, wire.ReqExtIDQueryTarget)
+		if target == nil || wire.QueryTarget(target.Z64) != wire.QueryTargetAll {
+			t.Errorf("QueryTarget ext = %+v, want QueryTargetAll", target)
+		}
+		budget := codec.FindExt(req.extensions, wire.ReqExtIDBudget)
+		if budget == nil || uint32(budget.Z64) != 32 {
+			t.Errorf("Budget ext = %+v, want 32", budget)
+		}
+		timeout := codec.FindExt(req.extensions, wire.ReqExtIDTimeout)
+		if timeout == nil || timeout.Z64 != 2500 {
+			t.Errorf("Timeout ext = %+v, want 2500 (ms)", timeout)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("router did not observe REQUEST within 2s")
+	}
+
+	// Terminate the get cleanly: inject RESPONSE_FINAL so the translator
+	// goroutine spawned by Session.Get exits via its normal range-over-
+	// channel path and the reply channel closes on its own.
+	router.injectResponseFinal(t, reqID)
+	select {
+	case _, ok := <-replies:
+		if ok {
+			t.Error("expected closed replies channel, got a value")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("replies channel not closed after RESPONSE_FINAL")
 	}
 }
 

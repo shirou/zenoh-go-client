@@ -180,8 +180,5 @@ func queryableInfoExt(complete bool, distance uint16) codec.Extension {
 	if complete {
 		v |= 1
 	}
-	return codec.Extension{
-		Header: codec.ExtHeader{ID: wire.QueryableInfoExtID, Encoding: codec.ExtEncZ64},
-		Z64:    v,
-	}
+	return codec.NewZ64Ext(wire.QueryableInfoExtID, false, v)
 }

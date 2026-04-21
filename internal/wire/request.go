@@ -38,6 +38,27 @@ const (
 	ReqExtIDTimeout     = 0x06
 )
 
+// QueryTargetExt builds the mandatory Z64 REQUEST extension carrying
+// QueryTarget (spec query.adoc §QueryTarget Extension). The value lives in
+// the low byte.
+func QueryTargetExt(t QueryTarget) codec.Extension {
+	return codec.NewZ64Ext(ReqExtIDQueryTarget, true, uint64(t))
+}
+
+// BudgetExt builds the non-mandatory Z64 REQUEST extension carrying the
+// maximum number of replies the querier will accept. Routers SHOULD stop
+// forwarding further RESPONSEs after the budget is reached.
+func BudgetExt(n uint32) codec.Extension {
+	return codec.NewZ64Ext(ReqExtIDBudget, false, uint64(n))
+}
+
+// TimeoutExt builds the non-mandatory Z64 REQUEST extension carrying the
+// query timeout in milliseconds (u64). Querier-side hint; absent means the
+// router MAY impose its own timeout.
+func TimeoutExt(ms uint64) codec.Extension {
+	return codec.NewZ64Ext(ReqExtIDTimeout, false, ms)
+}
+
 // Request is the REQUEST network message (ID 0x1C). Carries a QUERY body.
 //
 // Flags: N (Named suffix, bit 5) / M (Mapping, bit 6) / Z (extensions).
@@ -102,9 +123,9 @@ func DecodeRequest(r *codec.Reader, h codec.Header) (*Request, error) {
 //
 // Flags: C (Consolidation present, bit 5) / P (Parameters present, bit 6) / Z.
 type QueryBody struct {
-	Consolidation    *ConsolidationMode // nil = flag C=0
-	Parameters       string             // empty = flag P=0
-	Extensions       []codec.Extension
+	Consolidation *ConsolidationMode // nil = flag C=0
+	Parameters    string             // empty = flag P=0
+	Extensions    []codec.Extension
 }
 
 // EncodeTo writes a QUERY sub-message (the C/P flags are derived from the

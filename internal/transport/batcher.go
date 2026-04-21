@@ -139,10 +139,7 @@ func (b *Batcher) openFrame(l *lane) error {
 	w.EncodeHeader(h)
 	w.EncodeZ64(l.seqNum)
 	if b.attachQoS {
-		ext := codec.Extension{
-			Header: codec.ExtHeader{ID: wire.ExtIDQoS, Encoding: codec.ExtEncZ64, Mandatory: true},
-			Z64:    wire.QoS{Priority: l.priority}.EncodeZ64(),
-		}
+		ext := codec.NewZ64Ext(wire.ExtIDQoS, true, wire.QoS{Priority: l.priority}.EncodeZ64())
 		if err := w.EncodeExtension(ext); err != nil {
 			return err
 		}

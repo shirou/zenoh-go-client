@@ -1,0 +1,2 @@
+eclipse-zenoh==1.0.0
+pytest>=8.0

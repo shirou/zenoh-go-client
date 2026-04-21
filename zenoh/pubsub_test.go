@@ -17,17 +17,38 @@ import (
 // as a responder, then exposes a loop that reads DECLARE messages, records
 // them, and can inject PUSHes back to the client.
 type mockRouter struct {
-	t        *testing.T
-	ln       net.Listener
-	conn     net.Conn
-	declared chan declaredSubscriber
-	injectCh chan []byte // framed network-msg bytes to send (wrapped in FRAME)
-	closed   chan struct{}
+	t         *testing.T
+	ln        net.Listener
+	conn      net.Conn
+	declared  chan declaredSubscriber
+	declaredQ chan declaredQueryable
+	requests  chan inboundRequest
+	responses chan inboundResponse
+	injectCh  chan []byte // framed network-msg bytes to send (wrapped in FRAME)
+	closed    chan struct{}
 }
 
 type declaredSubscriber struct {
 	id  uint32
 	key string
+}
+
+type declaredQueryable struct {
+	id  uint32
+	key string
+}
+
+type inboundRequest struct {
+	requestID uint32
+	key       string
+	parameters string
+}
+
+type inboundResponse struct {
+	requestID uint32
+	key       string
+	payload   []byte
+	isErr     bool
 }
 
 func newMockRouter(t *testing.T) *mockRouter {
@@ -37,11 +58,14 @@ func newMockRouter(t *testing.T) *mockRouter {
 		t.Fatal(err)
 	}
 	m := &mockRouter{
-		t:        t,
-		ln:       ln,
-		declared: make(chan declaredSubscriber, 8),
-		injectCh: make(chan []byte, 8),
-		closed:   make(chan struct{}),
+		t:         t,
+		ln:        ln,
+		declared:  make(chan declaredSubscriber, 8),
+		declaredQ: make(chan declaredQueryable, 8),
+		requests:  make(chan inboundRequest, 8),
+		responses: make(chan inboundResponse, 8),
+		injectCh:  make(chan []byte, 8),
+		closed:    make(chan struct{}),
 	}
 	go m.serve()
 	return m
@@ -202,18 +226,62 @@ func (m *mockRouter) processFrameBody(body []byte) {
 		if err != nil {
 			return
 		}
-		if h.ID != wire.IDNetworkDeclare {
-			// Consume and skip other messages (keep test simple).
+		switch h.ID {
+		case wire.IDNetworkDeclare:
+			d, err := wire.DecodeDeclare(r, h)
+			if err != nil {
+				return
+			}
+			if entity, ok := d.Body.(*wire.DeclareEntity); ok {
+				switch entity.Kind {
+				case wire.IDDeclareSubscriber:
+					m.declared <- declaredSubscriber{id: entity.EntityID, key: entity.KeyExpr.Suffix}
+				case wire.IDDeclareQueryable:
+					m.declaredQ <- declaredQueryable{id: entity.EntityID, key: entity.KeyExpr.Suffix}
+				}
+			}
+		case wire.IDNetworkRequest:
+			req, err := wire.DecodeRequest(r, h)
+			if err != nil {
+				return
+			}
+			m.requests <- inboundRequest{
+				requestID:  req.RequestID,
+				key:        req.KeyExpr.Suffix,
+				parameters: paramsOf(req.Body),
+			}
+		case wire.IDNetworkResponse:
+			res, err := wire.DecodeResponse(r, h)
+			if err != nil {
+				return
+			}
+			ir := inboundResponse{requestID: res.RequestID, key: res.KeyExpr.Suffix}
+			switch body := res.Body.(type) {
+			case *wire.ReplyBody:
+				if put, ok := body.Inner.(*wire.PutBody); ok {
+					ir.payload = put.Payload
+				}
+			case *wire.ErrBody:
+				ir.isErr = true
+				ir.payload = body.Payload
+			}
+			m.responses <- ir
+		case wire.IDNetworkResponseFinal:
+			_, _ = wire.DecodeResponseFinal(r, h)
+		case wire.IDNetworkPush:
+			_, _ = wire.DecodePush(r, h)
+			return // PUSH consumes rest of body
+		default:
 			return
-		}
-		d, err := wire.DecodeDeclare(r, h)
-		if err != nil {
-			return
-		}
-		if sub, ok := d.Body.(*wire.DeclareEntity); ok && sub.Kind == wire.IDDeclareSubscriber {
-			m.declared <- declaredSubscriber{id: sub.EntityID, key: sub.KeyExpr.Suffix}
 		}
 	}
+}
+
+func paramsOf(q *wire.QueryBody) string {
+	if q == nil {
+		return ""
+	}
+	return q.Parameters
 }
 
 // sendFrame wraps a pre-encoded NetworkMessage in a FRAME + stream batch
@@ -233,12 +301,46 @@ func (m *mockRouter) sendFrame(conn net.Conn, networkMsg []byte) error {
 // injectPush makes the mock router deliver a PUSH/PUT to the client.
 func (m *mockRouter) injectPush(t *testing.T, keyExpr, payload string) {
 	t.Helper()
-	push := &wire.Push{
+	m.inject(t, &wire.Push{
 		KeyExpr: wire.WireExpr{Scope: 0, Suffix: keyExpr},
 		Body:    &wire.PutBody{Payload: []byte(payload)},
+	})
+}
+
+// injectRequest simulates a REQUEST arriving from a remote querier.
+func (m *mockRouter) injectRequest(t *testing.T, requestID uint32, keyExpr, params string) {
+	t.Helper()
+	body := &wire.QueryBody{}
+	if params != "" {
+		body.Parameters = params
 	}
+	m.inject(t, &wire.Request{
+		RequestID: requestID,
+		KeyExpr:   wire.WireExpr{Scope: 0, Suffix: keyExpr},
+		Body:      body,
+	})
+}
+
+// injectReply simulates a RESPONSE with a PUT body.
+func (m *mockRouter) injectReply(t *testing.T, requestID uint32, keyExpr, payload string) {
+	t.Helper()
+	m.inject(t, &wire.Response{
+		RequestID: requestID,
+		KeyExpr:   wire.WireExpr{Scope: 0, Suffix: keyExpr},
+		Body:      &wire.ReplyBody{Inner: &wire.PutBody{Payload: []byte(payload)}},
+	})
+}
+
+// injectResponseFinal signals end-of-replies for a request_id.
+func (m *mockRouter) injectResponseFinal(t *testing.T, requestID uint32) {
+	t.Helper()
+	m.inject(t, &wire.ResponseFinal{RequestID: requestID})
+}
+
+func (m *mockRouter) inject(t *testing.T, msg codec.Encoder) {
+	t.Helper()
 	w := codec.NewWriter(64)
-	if err := push.EncodeTo(w); err != nil {
+	if err := msg.EncodeTo(w); err != nil {
 		t.Fatal(err)
 	}
 	bs := make([]byte, w.Len())
@@ -246,7 +348,7 @@ func (m *mockRouter) injectPush(t *testing.T, keyExpr, payload string) {
 	select {
 	case m.injectCh <- bs:
 	case <-time.After(time.Second):
-		t.Fatal("injectPush: router busy")
+		t.Fatal("inject: router busy")
 	}
 }
 
@@ -322,6 +424,110 @@ func TestDeclareSubscriberReceivesInjectedPush(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("sample not delivered within 2s")
+	}
+}
+
+// TestSessionGetReceivesReplies: client sends Get → router captures
+// REQUEST → router injects two REPLYs + RESPONSE_FINAL → client receives
+// all replies and channel closes.
+func TestSessionGetReceivesReplies(t *testing.T) {
+	router := newMockRouter(t)
+	defer router.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cfg := NewConfig().WithEndpoint("tcp/" + router.Addr())
+	sess, err := Open(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+
+	ke, _ := NewKeyExpr("demo/get")
+	replyCh, err := sess.Get(ke, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for the router to see the REQUEST.
+	var req inboundRequest
+	select {
+	case req = <-router.requests:
+	case <-time.After(2 * time.Second):
+		t.Fatal("router did not see REQUEST within 2s")
+	}
+	if req.key != "demo/get" {
+		t.Errorf("REQUEST key = %q, want demo/get", req.key)
+	}
+
+	// Inject two replies then RESPONSE_FINAL.
+	router.injectReply(t, req.requestID, "demo/get", "first")
+	router.injectReply(t, req.requestID, "demo/get", "second")
+	router.injectResponseFinal(t, req.requestID)
+
+	got := []string{}
+	for r := range replyCh {
+		if !r.IsOk() {
+			t.Errorf("unexpected error reply")
+			continue
+		}
+		s, _ := r.Sample()
+		got = append(got, s.Payload().String())
+	}
+	if len(got) != 2 || got[0] != "first" || got[1] != "second" {
+		t.Errorf("got replies %v, want [first second]", got)
+	}
+}
+
+// TestDeclareQueryableRespondsToRequest: router sends REQUEST → our
+// queryable handler replies → router observes RESPONSE + RESPONSE_FINAL.
+func TestDeclareQueryableRespondsToRequest(t *testing.T) {
+	router := newMockRouter(t)
+	defer router.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cfg := NewConfig().WithEndpoint("tcp/" + router.Addr())
+	sess, err := Open(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+
+	ke, _ := NewKeyExpr("demo/**")
+	qbl, err := sess.DeclareQueryable(ke, func(q *Query) {
+		replyKE, _ := NewKeyExpr(q.KeyExpr().String())
+		_ = q.Reply(replyKE, NewZBytesFromString("pong"), nil)
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer qbl.Drop()
+
+	// Wait for D_QUERYABLE.
+	select {
+	case d := <-router.declaredQ:
+		if d.key != "demo/**" {
+			t.Errorf("router saw D_QUERYABLE key=%q", d.key)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("router did not observe D_QUERYABLE within 2s")
+	}
+
+	// Inject a REQUEST addressed at a key intersecting demo/**.
+	router.injectRequest(t, 42, "demo/ping", "")
+
+	// Expect one RESPONSE (the reply) from the client.
+	select {
+	case res := <-router.responses:
+		if res.requestID != 42 {
+			t.Errorf("RESPONSE request_id = %d, want 42", res.requestID)
+		}
+		if string(res.payload) != "pong" {
+			t.Errorf("RESPONSE payload = %q, want pong", res.payload)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("router did not see RESPONSE within 2s")
 	}
 }
 

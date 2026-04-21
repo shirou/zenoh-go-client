@@ -1,11 +1,24 @@
 package session
 
 import (
+	"errors"
 	"log/slog"
+	"net"
 	"runtime/debug"
 
 	"github.com/shirou/zenoh-go-client/internal/transport"
 )
+
+// logWriteErr downgrades expected-during-shutdown write errors to Debug.
+// A "use of closed network connection" here means triggerShutdown already
+// ran — WARNing about it is just noise on the normal close path.
+func logWriteErr(logger *slog.Logger, msg string, err error) {
+	if errors.Is(err, net.ErrClosed) {
+		logger.Debug(msg+" (link closed during shutdown)", "err", err)
+		return
+	}
+	logger.Warn(msg, "err", err)
+}
 
 // OutboundItem is the unit passed through the session's outbound queue.
 // Exactly one of NetworkMsg / RawBatch is set:
@@ -56,7 +69,7 @@ func writerLoop(
 				continue
 			}
 			if err := handleItem(item, batcher, link); err != nil {
-				logger.Warn("writer: link write failed, draining outQ", "err", err)
+				logWriteErr(logger, "writer: link write failed, draining outQ", err)
 				writeDead = true
 				continue
 			}
@@ -96,13 +109,13 @@ func drainAvailable(
 				continue
 			}
 			if err := handleItem(item, batcher, link); err != nil {
-				logger.Warn("writer: link write failed, draining outQ", "err", err)
+				logWriteErr(logger, "writer: link write failed, draining outQ", err)
 				writeDead = true
 			}
 		default:
 			if !writeDead {
 				if err := batcher.FlushAll(); err != nil {
-					logger.Warn("writer: link flush failed", "err", err)
+					logWriteErr(logger, "writer: link flush failed", err)
 					writeDead = true
 				}
 			}

@@ -1,10 +1,34 @@
 package wire
 
 import (
+	"bytes"
 	"fmt"
 
 	"github.com/shirou/zenoh-go-client/internal/codec"
 )
+
+// CloneTimestamp returns a deep copy of t (with an independent ZID.Bytes
+// backing array), or nil if t is nil. Used on decode paths where the wire
+// reader buffer is reused after return.
+func CloneTimestamp(t *Timestamp) *Timestamp {
+	if t == nil {
+		return nil
+	}
+	out := *t
+	out.ZID.Bytes = bytes.Clone(t.ZID.Bytes)
+	return &out
+}
+
+// CloneEncoding returns a shallow copy of e, or nil if e is nil. Encoding
+// contains no slices so a plain struct copy suffices; the wrapper keeps
+// call sites symmetric with CloneTimestamp.
+func CloneEncoding(e *Encoding) *Encoding {
+	if e == nil {
+		return nil
+	}
+	out := *e
+	return &out
+}
 
 // PutBody is a PUT sub-message (ID 0x01) nested inside a PUSH or REPLY.
 //

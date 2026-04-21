@@ -3,6 +3,7 @@ package zenoh
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sync/atomic"
 
 	intkeyexpr "github.com/shirou/zenoh-go-client/internal/keyexpr"
@@ -74,14 +75,38 @@ func (s *Session) Close() error {
 	if !s.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	// Try to emit a CLOSE before tearing down. Best-effort.
-	if closeBytes, err := session.EncodeCloseMessage(session.CloseReasonGeneric); err == nil {
-		select {
-		case s.runtime.OutQ <- session.OutboundItem{RawBatch: closeBytes}:
-		default:
-		}
-	}
+	s.sendFarewellClose()
 	return s.inner.Close()
+}
+
+// sendFarewellClose enqueues a best-effort CLOSE frame. The outbound queue
+// may race with the shutdown orchestrator (which closes it once the link
+// goroutines exit). LinkClosed closes strictly before OutQ is closed, so
+// observing LinkClosed as open means the send is safe; the recover is a
+// narrow safety net for the "send on closed channel" race that only the
+// Go runtime can surface here — it leaves every other panic intact.
+func (s *Session) sendFarewellClose() {
+	defer func() {
+		if r := recover(); r != nil {
+			if _, ok := r.(runtime.Error); !ok {
+				panic(r)
+			}
+		}
+	}()
+	select {
+	case <-s.runtime.LinkClosed:
+		return
+	default:
+	}
+	closeBytes, err := session.EncodeCloseMessage(session.CloseReasonGeneric)
+	if err != nil {
+		return
+	}
+	select {
+	case s.runtime.OutQ <- session.OutboundItem{RawBatch: closeBytes}:
+	case <-s.runtime.LinkClosed:
+	default:
+	}
 }
 
 // IsClosed reports whether Close has been called.

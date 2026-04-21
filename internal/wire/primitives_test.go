@@ -56,36 +56,41 @@ func TestResolutionDefault(t *testing.T) {
 	if byte(DefaultResolution) != 0x0A {
 		t.Errorf("default resolution byte = %#x, want 0x0A", byte(DefaultResolution))
 	}
-	if DefaultResolution.Bits(FieldFrameSN) != 32 {
-		t.Errorf("default FSN bits = %d, want 32", DefaultResolution.Bits(FieldFrameSN))
+	// Code 0b10 → 4-byte VLE → 28 data bits. Matches zenoh-rust's
+	// RES_U32 = u32::MAX >> 4.
+	if DefaultResolution.Bits(FieldFrameSN) != 28 {
+		t.Errorf("default FSN bits = %d, want 28", DefaultResolution.Bits(FieldFrameSN))
 	}
-	if DefaultResolution.Bits(FieldRequestID) != 32 {
-		t.Errorf("default RID bits = %d, want 32", DefaultResolution.Bits(FieldRequestID))
+	if DefaultResolution.Bits(FieldRequestID) != 28 {
+		t.Errorf("default RID bits = %d, want 28", DefaultResolution.Bits(FieldRequestID))
+	}
+	if m := DefaultResolution.Mask(FieldFrameSN); m != 0x0FFFFFFF {
+		t.Errorf("default FSN mask = %#x, want 0x0FFFFFFF", m)
 	}
 }
 
 func TestResolutionCustom(t *testing.T) {
-	// FSN=16-bit (code 0b01), RID=8-bit (code 0b00)
+	// FSN=2-byte VLE (code 0b01), RID=1-byte VLE (code 0b00)
 	res := NewResolution(0b01, 0b00)
-	if res.Bits(FieldFrameSN) != 16 {
-		t.Errorf("FSN bits = %d, want 16", res.Bits(FieldFrameSN))
+	if res.Bits(FieldFrameSN) != 14 {
+		t.Errorf("FSN bits = %d, want 14", res.Bits(FieldFrameSN))
 	}
-	if res.Bits(FieldRequestID) != 8 {
-		t.Errorf("RID bits = %d, want 8", res.Bits(FieldRequestID))
+	if res.Bits(FieldRequestID) != 7 {
+		t.Errorf("RID bits = %d, want 7", res.Bits(FieldRequestID))
 	}
-	if m := res.Mask(FieldFrameSN); m != 0xFFFF {
-		t.Errorf("FSN mask = %#x, want 0xFFFF", m)
+	if m := res.Mask(FieldFrameSN); m != 0x3FFF {
+		t.Errorf("FSN mask = %#x, want 0x3FFF", m)
 	}
 }
 
 func TestResolution64Bit(t *testing.T) {
-	// All ones means 64-bit; Mask must not overflow.
+	// Code 0b11 → 9-byte VLE → 63 data bits.
 	res := NewResolution(0b11, 0b11)
-	if res.Bits(FieldFrameSN) != 64 {
-		t.Errorf("FSN bits = %d", res.Bits(FieldFrameSN))
+	if res.Bits(FieldFrameSN) != 63 {
+		t.Errorf("FSN bits = %d, want 63", res.Bits(FieldFrameSN))
 	}
-	if res.Mask(FieldFrameSN) != ^uint64(0) {
-		t.Errorf("FSN mask = %#x", res.Mask(FieldFrameSN))
+	if m := res.Mask(FieldFrameSN); m != 0x7FFFFFFFFFFFFFFF {
+		t.Errorf("FSN mask = %#x, want 0x7FFF...", m)
 	}
 }
 

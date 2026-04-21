@@ -23,10 +23,10 @@ clean:
 
 # Bring up zenohd + python for interop tests
 interop-up:
-	docker-compose -f tests/docker-compose.yml up -d
+	docker compose -f tests/docker-compose.yml up -d --build --wait
 
 interop-down:
-	docker-compose -f tests/docker-compose.yml down
+	docker compose -f tests/docker-compose.yml down
 
 interop-test: interop-up
-	go test -race -tags interop ./tests/interop/...
+	go test -race -tags interop -count=1 -v ./tests/interop/...

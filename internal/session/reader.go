@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"runtime/debug"
 	"sync/atomic"
 	"time"
@@ -59,9 +60,20 @@ func readerLoop(cfg ReaderConfig, closing <-chan struct{}) {
 
 		n, err := cfg.Link.ReadBatch(buf)
 		if err != nil {
-			if errors.Is(err, io.EOF) {
+			// If shutdown was already initiated, the link was closed under
+			// us on purpose — don't WARN.
+			shuttingDown := false
+			select {
+			case <-closing:
+				shuttingDown = true
+			default:
+			}
+			switch {
+			case errors.Is(err, io.EOF):
 				cfg.Logger.Debug("reader: peer closed link (EOF)")
-			} else {
+			case shuttingDown || errors.Is(err, net.ErrClosed):
+				cfg.Logger.Debug("reader: link closed during shutdown", "err", err)
+			default:
 				cfg.Logger.Warn("reader: link read failed", "err", err)
 			}
 			return

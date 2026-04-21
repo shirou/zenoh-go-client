@@ -58,9 +58,7 @@ func (s *Session) enqueuePush(keyExpr KeyExpr, body wire.PushBody, opts *PutOpti
 // enqueueNetwork encodes msg, wraps it in an OutboundMessage with the given
 // routing metadata, and sends it on the writer channel. Common backbone
 // for Put, Declare, and any other network-layer emission.
-func (s *Session) enqueueNetwork(msg interface {
-	EncodeTo(w *codec.Writer) error
-}, prio wire.QoSPriority, reliable, express bool) error {
+func (s *Session) enqueueNetwork(msg codec.Encoder, prio wire.QoSPriority, reliable, express bool) error {
 	encoded, err := transport.EncodeNetworkMessage(msg)
 	if err != nil {
 		return err

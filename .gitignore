@@ -3,3 +3,5 @@ repo
 *.out
 coverage.html
 testdata/fuzz/
+__pycache__/
+*.pyc

@@ -183,12 +183,7 @@ func hasQoSExt(exts []codec.Extension) bool {
 
 // --- helpers ---
 
-// transportMessage is anything that encodes its own header and body to a writer.
-type transportMessage interface {
-	EncodeTo(w *codec.Writer) error
-}
-
-func writeTransport(link transport.Link, msg transportMessage) error {
+func writeTransport(link transport.Link, msg codec.Encoder) error {
 	w := codec.NewWriter(64)
 	if err := msg.EncodeTo(w); err != nil {
 		return err

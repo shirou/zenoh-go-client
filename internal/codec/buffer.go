@@ -76,6 +76,13 @@ func (r *Reader) ReadU16LE() (uint16, error) {
 	return uint16(b[0]) | uint16(b[1])<<8, nil
 }
 
+// Encoder is implemented by any wire message that can serialise itself
+// into a Writer. Shared by transport.EncodeNetworkMessage, the handshake
+// writeTransport helper, Session.enqueueNetwork, and test fixtures.
+type Encoder interface {
+	EncodeTo(w *Writer) error
+}
+
 // Reader is a read cursor over a byte slice.
 //
 // All decoders share a Reader so they can compose without copying: the

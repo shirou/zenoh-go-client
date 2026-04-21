@@ -155,6 +155,9 @@ func (s *Session) Run(cfg RunConfig) (*Runtime, error) {
 		s.closeOnce.Do(func() { close(s.closing) })
 		outQSenders.Wait()
 		close(outQ)
+		// Close out any in-flight Gets so their public-side translator
+		// goroutines wake up and exit.
+		s.cancelAllGets()
 	})
 
 	return &Runtime{

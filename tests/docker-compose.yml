@@ -4,6 +4,8 @@ services:
     ports:
       - "7447:7447"
     command: ["--no-multicast-scouting"]
+    environment:
+      RUST_LOG: "zenoh=info"
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "7447"]
       interval: 2s
@@ -11,13 +13,14 @@ services:
       retries: 15
 
   python:
-    image: python:3.12-slim
+    build:
+      context: ./interop
     depends_on:
       zenohd:
         condition: service_healthy
     volumes:
       - ./interop:/work
     working_dir: /work
-    command: ["sleep", "infinity"]
     environment:
       ZENOH_ENDPOINTS: "tcp/zenohd:7447"
+      PYTHONUNBUFFERED: "1"

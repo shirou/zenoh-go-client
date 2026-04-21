@@ -7,8 +7,18 @@ package wire
 //	|X|X|X|X|RID|FSN|
 //	+-+-+-+-+-+-+-+-+
 //
-// Codes for each 2-bit sub-field: 0b00=8-bit, 0b01=16-bit, 0b10=32-bit,
-// 0b11=64-bit. Default value = 0x0A → both FSN and RID at 32-bit.
+// Code → maximum VLE-encoded byte count of the field:
+//
+//	0b00 → 1 byte (7 data bits, max value 127)
+//	0b01 → 2 bytes (14 data bits, max value 16 383)
+//	0b10 → 4 bytes (28 data bits, max value 268 435 455)  — default
+//	0b11 → 9 bytes (63 data bits, max value 2⁶³−1)
+//
+// The widths named "8/16/32/64" in the spec table refer to the nominal
+// VLE-byte budget, NOT the data bit width of the integer. zenoh-rust's
+// `io/zenoh-transport/src/common/seq_num.rs::get_mask` is the canonical
+// definition and we match it here; treating code 0b10 as "value <= 2^32 - 1"
+// causes the peer to reject frames whose SN happens to exceed 0x0FFFFFFF.
 
 // Field selects which 2-bit width (FSN or RID) to read from a Resolution byte.
 type Field uint8
@@ -21,17 +31,26 @@ const (
 // Resolution is a decoded resolution byte.
 type Resolution byte
 
-// DefaultResolution = FSN 32-bit, RID 32-bit.
+// DefaultResolution = FSN 4-byte VLE (28 data bits), RID 4-byte VLE.
 const DefaultResolution Resolution = 0x0A
 
-// Bits returns the bit width selected for the given field.
+// Bits returns the number of data bits carried by the selected field.
 func (r Resolution) Bits(f Field) uint8 {
 	code := uint8(r>>(2*f)) & 0b11
-	return 8 << code // 0b00→8, 0b01→16, 0b10→32, 0b11→64
+	switch code {
+	case 0b00:
+		return 7
+	case 0b01:
+		return 14
+	case 0b10:
+		return 28
+	default:
+		return 63
+	}
 }
 
-// Mask returns (1<<bits)-1 for the given field — useful as a seq-number mask.
-// Returns 0xFFFF_FFFF_FFFF_FFFF (all ones) for a 64-bit field.
+// Mask returns the maximum value of the selected field — useful as a
+// seq-number / request-id mask.
 func (r Resolution) Mask(f Field) uint64 {
 	b := r.Bits(f)
 	if b >= 64 {

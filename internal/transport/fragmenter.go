@@ -63,9 +63,7 @@ func (f *Fragmenter) Fragment(msgBytes []byte, reliable bool, seqNumStart uint64
 //
 // The caller usually feeds the result either directly into a batch buffer
 // (when it fits) or into Fragmenter.Fragment (when it does not).
-func EncodeNetworkMessage(msg interface {
-	EncodeTo(w *codec.Writer) error
-}) ([]byte, error) {
+func EncodeNetworkMessage(msg codec.Encoder) ([]byte, error) {
 	w := codec.NewWriter(256)
 	if err := msg.EncodeTo(w); err != nil {
 		return nil, err

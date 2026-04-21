@@ -33,7 +33,9 @@ type LivelinessToken struct {
 }
 
 // DeclareToken registers a liveliness token on keyExpr and emits D_TOKEN to
-// the router. Always call Drop when done so peers are notified.
+// the router. Always call Drop when done so peers are notified. The token
+// is tracked at the session level so it is automatically re-declared on
+// reconnect.
 func (l *Liveliness) DeclareToken(keyExpr KeyExpr, opts *LivelinessTokenOptions) (*LivelinessToken, error) {
 	_ = opts // no fields yet; reserved for future use
 	s := l.session
@@ -44,7 +46,13 @@ func (l *Liveliness) DeclareToken(keyExpr KeyExpr, opts *LivelinessTokenOptions)
 		return nil, ErrInvalidKeyExpr
 	}
 	id := s.inner.IDs().AllocTokenID()
+	s.tokensMu.Lock()
+	s.tokens[id] = keyExpr
+	s.tokensMu.Unlock()
 	if err := s.sendDeclareToken(id, keyExpr); err != nil {
+		s.tokensMu.Lock()
+		delete(s.tokens, id)
+		s.tokensMu.Unlock()
 		return nil, fmt.Errorf("send D_TOKEN: %w", err)
 	}
 	return &LivelinessToken{session: s, keyExpr: keyExpr, id: id}, nil
@@ -59,6 +67,9 @@ func (t *LivelinessToken) Drop() {
 	if !t.dropped.CompareAndSwap(false, true) {
 		return
 	}
+	t.session.tokensMu.Lock()
+	delete(t.session.tokens, t.id)
+	t.session.tokensMu.Unlock()
 	// Best-effort U_TOKEN emission. If the link is already gone, peers
 	// observe the token loss through session-level cleanup.
 	_ = t.session.sendUndeclareToken(t.id, t.keyExpr)

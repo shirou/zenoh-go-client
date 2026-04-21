@@ -75,7 +75,8 @@ func (s *Session) DeclareQueryable(keyExpr KeyExpr, handler QueryHandler, opts *
 			slog.Default().Warn("zenoh: queryable dispatcher queue full, dropping query")
 		}
 	}
-	s.inner.RegisterQueryable(id, keyExpr.internalKeyExpr(), deliverFn)
+	complete := opts != nil && opts.Complete
+	s.inner.RegisterQueryable(id, keyExpr.internalKeyExpr(), deliverFn, complete)
 
 	if err := s.sendDeclareQueryable(id, keyExpr, opts); err != nil {
 		s.inner.UnregisterQueryable(id)

@@ -5,24 +5,28 @@ import (
 	"sync"
 )
 
-// Session is the internal state container for a zenoh client session.
-// It owns all per-session goroutines (reader, writer, keepalive watchdog,
-// inbound dispatcher, reconnect manager) and the entity registry.
+// Session is the internal state container for a zenoh client session. It
+// owns session-scoped state (state machine, ID allocators, entity
+// registries) and persists across reconnects. Per-link state — reader /
+// writer / keepalive / watchdog goroutines, the outbound queue, sequence
+// numbers — lives on Runtime (see run.go). A single Session can host
+// multiple Runtimes over its lifetime via Run() + reconnect.
 type Session struct {
 	state stateAtom
 	ids   idAllocators
 
-	// Coordination primitives shared by all per-session goroutines.
-	closing chan struct{}  // closed by Close(); signals everyone to exit
-	wg      sync.WaitGroup // waits for every goroutine launched by Run
-
+	// userClose is closed by Session.Close and signals the reconnect
+	// orchestrator (in the public zenoh layer) that no further Runtime
+	// should be started. Per-runtime goroutines select on Runtime.stop,
+	// not on this channel.
+	userClose chan struct{}
 	closeOnce sync.Once
 
 	// logger is the session-scoped logger. Tests override via OptionLogger.
 	logger *slog.Logger
 
-	// Lazily-initialised registries — most code paths (including lifecycle
-	// tests) don't touch them.
+	// Lazily-initialised registries — survive reconnects so entity
+	// re-declaration can iterate them.
 	subsOnce sync.Once
 	subs     *subscribers
 	qblsOnce sync.Once
@@ -48,8 +52,8 @@ func WithLogger(logger *slog.Logger) Option {
 // live link.
 func New(opts ...Option) *Session {
 	s := &Session{
-		closing: make(chan struct{}),
-		logger:  slog.Default(),
+		userClose: make(chan struct{}),
+		logger:    slog.Default(),
 	}
 	s.state.Store(StateInit)
 	for _, opt := range opts {
@@ -69,14 +73,14 @@ func (s *Session) IsClosed() bool {
 // Logger returns the session logger.
 func (s *Session) Logger() *slog.Logger { return s.logger }
 
-// IDs returns the session's entity ID allocators. Used by Publisher/Subscriber
-// declaration paths.
+// IDs returns the session's entity ID allocators. Used by Publisher /
+// Subscriber / Queryable / LivelinessToken declaration paths.
 func (s *Session) IDs() *idAllocators { return &s.ids }
 
-// Close requests orderly shutdown of the session.
-//
-// It is safe (and idempotent) to call Close concurrently with any other
-// method. Close returns after every per-session goroutine has exited.
+// Close signals end-of-life to any reconnect orchestrator watching this
+// session. It does NOT drain per-runtime goroutines — that is the current
+// Runtime's responsibility; the public zenoh layer waits for both.
+// Idempotent.
 func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
 		for {
@@ -85,14 +89,12 @@ func (s *Session) Close() error {
 				break
 			}
 		}
-		close(s.closing)
+		close(s.userClose)
 	})
-	// wg.Wait is safe to call from multiple goroutines; it blocks until the
-	// goroutines launched by Run have all returned.
-	s.wg.Wait()
 	return nil
 }
 
-// ClosingCh returns the closing channel internal goroutines select on to
-// observe session shutdown. Package-internal use only.
-func (s *Session) ClosingCh() <-chan struct{} { return s.closing }
+// UserCloseCh returns the channel that is closed when Session.Close has
+// been called. The reconnect orchestrator selects on it to distinguish
+// "link failure, try again" from "user requested shutdown, give up".
+func (s *Session) UserCloseCh() <-chan struct{} { return s.userClose }

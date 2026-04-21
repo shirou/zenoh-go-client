@@ -69,6 +69,19 @@ func (s *Session) UnregisterSubscriber(id uint32) {
 	reg.mu.Unlock()
 }
 
+// ForEachSubscriber invokes fn for every registered subscriber. fn MUST
+// NOT call RegisterSubscriber / UnregisterSubscriber on this session — the
+// registry RLock is held. Used by the reconnect orchestrator to replay
+// D_SUBSCRIBER messages on a fresh Runtime.
+func (s *Session) ForEachSubscriber(fn func(id uint32, ke keyexpr.KeyExpr)) {
+	reg := s.regSubscribers()
+	reg.mu.RLock()
+	defer reg.mu.RUnlock()
+	for id, sub := range reg.byID {
+		fn(id, sub.keyExpr)
+	}
+}
+
 // dispatchPush routes an inbound PUSH to every subscriber whose key
 // expression intersects the push's key. For MVP we walk the registry
 // linearly; a trie is Phase 6+.

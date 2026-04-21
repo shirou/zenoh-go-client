@@ -23,9 +23,10 @@ type QueryReceived struct {
 type QueryDeliverFn func(QueryReceived)
 
 type queryableEntry struct {
-	id      uint32
-	keyExpr keyexpr.KeyExpr
-	deliver QueryDeliverFn
+	id       uint32
+	keyExpr  keyexpr.KeyExpr
+	deliver  QueryDeliverFn
+	complete bool // QueryableInfo.Complete flag for D_QUERYABLE replay on reconnect
 }
 
 type queryables struct {
@@ -41,12 +42,25 @@ func (s *Session) regQueryables() *queryables {
 }
 
 // RegisterQueryable stores a callback to be invoked for every inbound
-// REQUEST that intersects ke.
-func (s *Session) RegisterQueryable(id uint32, ke keyexpr.KeyExpr, deliver QueryDeliverFn) {
+// REQUEST that intersects ke. complete mirrors the QueryableInfo.Complete
+// flag so the reconnect orchestrator can replay the exact D_QUERYABLE
+// extension chain.
+func (s *Session) RegisterQueryable(id uint32, ke keyexpr.KeyExpr, deliver QueryDeliverFn, complete bool) {
 	reg := s.regQueryables()
 	reg.mu.Lock()
-	reg.byID[id] = &queryableEntry{id: id, keyExpr: ke, deliver: deliver}
+	reg.byID[id] = &queryableEntry{id: id, keyExpr: ke, deliver: deliver, complete: complete}
 	reg.mu.Unlock()
+}
+
+// ForEachQueryable invokes fn for every registered queryable. See
+// ForEachSubscriber for lock-holding semantics.
+func (s *Session) ForEachQueryable(fn func(id uint32, ke keyexpr.KeyExpr, complete bool)) {
+	reg := s.regQueryables()
+	reg.mu.RLock()
+	defer reg.mu.RUnlock()
+	for id, qbl := range reg.byID {
+		fn(id, qbl.keyExpr, qbl.complete)
+	}
 }
 
 // UnregisterQueryable removes a queryable from the registry.

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,12 +14,15 @@ import (
 	"github.com/shirou/zenoh-go-client/internal/wire"
 )
 
-// mockRouter accepts one TCP connection, completes the INIT/OPEN handshake
-// as a responder, then exposes a loop that reads DECLARE messages, records
-// them, and can inject PUSHes back to the client.
+// mockRouter listens on a TCP port, completes the INIT/OPEN handshake as
+// a responder, then exposes a loop that reads DECLARE messages, records
+// them, and can inject PUSHes back to the client. The accept loop restarts
+// after a connection is torn down so reconnect tests can observe multiple
+// handshakes in sequence.
 type mockRouter struct {
 	t          *testing.T
 	ln         net.Listener
+	connMu     sync.Mutex // guards conn swap between serve and tests
 	conn       net.Conn
 	declared   chan declaredSubscriber
 	declaredQ  chan declaredQueryable
@@ -28,6 +32,20 @@ type mockRouter struct {
 	responses  chan inboundResponse
 	injectCh   chan []byte // framed network-msg bytes to send (wrapped in FRAME)
 	closed     chan struct{}
+}
+
+// setConn swaps in a freshly-accepted connection.
+func (m *mockRouter) setConn(c net.Conn) {
+	m.connMu.Lock()
+	m.conn = c
+	m.connMu.Unlock()
+}
+
+// currentConn returns the most recently accepted connection, or nil.
+func (m *mockRouter) currentConn() net.Conn {
+	m.connMu.Lock()
+	defer m.connMu.Unlock()
+	return m.conn
 }
 
 type declaredSubscriber struct {
@@ -95,28 +113,36 @@ func (m *mockRouter) Close() {
 		return
 	default:
 	}
-	if m.conn != nil {
-		m.conn.Close()
+	if c := m.currentConn(); c != nil {
+		c.Close()
 	}
 	m.ln.Close()
 }
 
 func (m *mockRouter) serve() {
 	defer close(m.closed)
-	conn, err := m.ln.Accept()
-	if err != nil {
-		return
-	}
-	m.conn = conn
-	defer conn.Close()
+	for {
+		conn, err := m.ln.Accept()
+		if err != nil {
+			return
+		}
+		m.setConn(conn)
 
-	// --- Handshake as responder ---
-	if err := m.handshake(conn); err != nil {
-		m.t.Logf("mockRouter handshake: %v", err)
-		return
-	}
+		// --- Handshake as responder ---
+		if err := m.handshake(conn); err != nil {
+			m.t.Logf("mockRouter handshake: %v", err)
+			conn.Close()
+			continue
+		}
 
-	// --- Post-handshake loop ---
+		m.serveConn(conn)
+		conn.Close()
+	}
+}
+
+// serveConn drives post-handshake traffic for one accepted connection.
+// Returns when the peer hangs up so the outer loop can accept a reconnect.
+func (m *mockRouter) serveConn(conn net.Conn) {
 	buf := make([]byte, codec.MaxBatchSize)
 	for {
 		select {
@@ -735,6 +761,127 @@ func TestDeclareLivelinessTokenEmitsDAndU(t *testing.T) {
 		t.Errorf("unexpected second U_* after Drop: %+v", u)
 	case <-time.After(500 * time.Millisecond):
 	}
+}
+
+// TestReconnectReplaysEntities: drop the current link after declaring a
+// subscriber + queryable + liveliness token. The mockRouter accepts a new
+// connection; the reconnect orchestrator must re-send D_SUBSCRIBER,
+// D_QUERYABLE, and D_TOKEN with the same IDs.
+func TestReconnectReplaysEntities(t *testing.T) {
+	router := newMockRouter(t)
+	defer router.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cfg := NewConfig().WithEndpoint("tcp/" + router.Addr())
+	cfg.ReconnectInitial = 20 * time.Millisecond
+	cfg.ReconnectMax = 40 * time.Millisecond
+	sess, err := Open(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+
+	subKE, _ := NewKeyExpr("demo/sub/**")
+	sub, err := sess.DeclareSubscriber(subKE, NewFifoChannel[Sample](4))
+	if err != nil {
+		t.Fatalf("DeclareSubscriber: %v", err)
+	}
+	defer sub.Drop()
+
+	qblKE, _ := NewKeyExpr("demo/qbl/**")
+	qbl, err := sess.DeclareQueryable(qblKE, func(*Query) {}, &QueryableOptions{Complete: true})
+	if err != nil {
+		t.Fatalf("DeclareQueryable: %v", err)
+	}
+	defer qbl.Drop()
+
+	tokKE, _ := NewKeyExpr("demo/token")
+	tok, err := sess.Liveliness().DeclareToken(tokKE, nil)
+	if err != nil {
+		t.Fatalf("DeclareToken: %v", err)
+	}
+	defer tok.Drop()
+
+	// Drain initial declarations from the first connection.
+	gotSubID := drainSubscriberDeclare(t, router, "demo/sub/**")
+	gotQblID := drainQueryableDeclare(t, router, "demo/qbl/**")
+	gotTokID := drainTokenDeclare(t, router, "demo/token")
+
+	// Drop the current link from the router side.
+	router.currentConn().Close()
+
+	// Reconnect orchestrator should redial and replay entities on the
+	// freshly accepted connection. Assert we see the same IDs again.
+	gotSubID2 := drainSubscriberDeclare(t, router, "demo/sub/**")
+	gotQblID2 := drainQueryableDeclare(t, router, "demo/qbl/**")
+	gotTokID2 := drainTokenDeclare(t, router, "demo/token")
+
+	if gotSubID != gotSubID2 {
+		t.Errorf("sub id changed across reconnect: %d → %d", gotSubID, gotSubID2)
+	}
+	if gotQblID != gotQblID2 {
+		t.Errorf("qbl id changed across reconnect: %d → %d", gotQblID, gotQblID2)
+	}
+	if gotTokID != gotTokID2 {
+		t.Errorf("tok id changed across reconnect: %d → %d", gotTokID, gotTokID2)
+	}
+
+	// Data-plane sanity: a PUSH injected on the *new* connection should
+	// still reach the subscriber — proves the registry replay restored
+	// not just the wire declarations but the end-to-end dispatch.
+	router.injectPush(t, "demo/sub/hello", "post-reconnect")
+	ch := sub.Handler().(<-chan Sample)
+	select {
+	case sample := <-ch:
+		if got := string(sample.Payload().Bytes()); got != "post-reconnect" {
+			t.Errorf("post-reconnect sample = %q, want %q", got, "post-reconnect")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("subscriber did not receive post-reconnect PUSH within 3s")
+	}
+}
+
+func drainSubscriberDeclare(t *testing.T, router *mockRouter, wantKey string) uint32 {
+	t.Helper()
+	select {
+	case d := <-router.declared:
+		if d.key != wantKey {
+			t.Errorf("D_SUBSCRIBER key=%q, want %q", d.key, wantKey)
+		}
+		return d.id
+	case <-time.After(3 * time.Second):
+		t.Fatalf("D_SUBSCRIBER %q not observed within 3s", wantKey)
+	}
+	return 0
+}
+
+func drainQueryableDeclare(t *testing.T, router *mockRouter, wantKey string) uint32 {
+	t.Helper()
+	select {
+	case d := <-router.declaredQ:
+		if d.key != wantKey {
+			t.Errorf("D_QUERYABLE key=%q, want %q", d.key, wantKey)
+		}
+		return d.id
+	case <-time.After(3 * time.Second):
+		t.Fatalf("D_QUERYABLE %q not observed within 3s", wantKey)
+	}
+	return 0
+}
+
+func drainTokenDeclare(t *testing.T, router *mockRouter, wantKey string) uint32 {
+	t.Helper()
+	select {
+	case d := <-router.declaredT:
+		if d.key != wantKey {
+			t.Errorf("D_TOKEN key=%q, want %q", d.key, wantKey)
+		}
+		return d.id
+	case <-time.After(3 * time.Second):
+		t.Fatalf("D_TOKEN %q not observed within 3s", wantKey)
+	}
+	return 0
 }
 
 func TestOpenFailsOnClosedEndpoint(t *testing.T) {

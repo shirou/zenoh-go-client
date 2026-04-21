@@ -1,6 +1,8 @@
 package zenoh
 
 import (
+	goruntime "runtime"
+
 	"github.com/shirou/zenoh-go-client/internal/codec"
 	"github.com/shirou/zenoh-go-client/internal/session"
 	"github.com/shirou/zenoh-go-client/internal/transport"
@@ -55,23 +57,46 @@ func (s *Session) enqueuePush(keyExpr KeyExpr, body wire.PushBody, opts *PutOpti
 	return s.enqueueNetwork(push, prio, reliable, express)
 }
 
-// enqueueNetwork encodes msg, wraps it in an OutboundMessage with the given
-// routing metadata, and sends it on the writer channel. Common backbone
-// for Put, Declare, and any other network-layer emission.
-func (s *Session) enqueueNetwork(msg codec.Encoder, prio wire.QoSPriority, reliable, express bool) error {
+// enqueueNetwork encodes msg, wraps it in an OutboundMessage with the
+// given routing metadata, and sends it on the current runtime's writer
+// channel. Returns ErrSessionNotReady when the session is between
+// Runtimes (reconnect in progress) and ErrConnectionLost when the link
+// drops mid-send.
+//
+// Common backbone for Put, Declare, and any other network-layer emission.
+func (s *Session) enqueueNetwork(msg codec.Encoder, prio wire.QoSPriority, reliable, express bool) (err error) {
+	rt := s.snapshotRuntime()
+	if rt == nil {
+		return ErrSessionNotReady
+	}
 	encoded, err := transport.EncodeNetworkMessage(msg)
 	if err != nil {
 		return err
 	}
+	// The runtime orchestrator closes OutQ strictly after LinkClosed
+	// closes, so in the select below we observe LinkClosed first and
+	// bail — almost always. The tight window where LinkClosed is already
+	// closed AND the orchestrator has started close(OutQ) can still
+	// surface as "send on closed channel". We convert that to
+	// ErrConnectionLost rather than propagating the panic.
+	defer func() {
+		if r := recover(); r != nil {
+			if _, ok := r.(goruntime.Error); ok {
+				err = ErrConnectionLost
+				return
+			}
+			panic(r)
+		}
+	}()
 	select {
-	case s.runtime.OutQ <- session.OutboundItem{NetworkMsg: &transport.OutboundMessage{
+	case rt.OutQ <- session.OutboundItem{NetworkMsg: &transport.OutboundMessage{
 		Encoded:  encoded,
 		Priority: prio,
 		Reliable: reliable,
 		Express:  express,
 	}}:
 		return nil
-	case <-s.runtime.LinkClosed:
+	case <-rt.LinkClosed:
 		return ErrConnectionLost
 	}
 }

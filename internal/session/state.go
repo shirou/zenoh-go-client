@@ -43,8 +43,8 @@ func (s State) String() string {
 // stateAtom wraps atomic.Int32 with State-typed Load/Store/CAS helpers.
 type stateAtom struct{ v atomic.Int32 }
 
-func (a *stateAtom) Load() State      { return State(a.v.Load()) }
-func (a *stateAtom) Store(s State)    { a.v.Store(int32(s)) }
+func (a *stateAtom) Load() State   { return State(a.v.Load()) }
+func (a *stateAtom) Store(s State) { a.v.Store(int32(s)) }
 func (a *stateAtom) CAS(old, new State) bool {
 	return a.v.CompareAndSwap(int32(old), int32(new))
 }

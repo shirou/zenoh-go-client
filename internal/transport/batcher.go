@@ -28,9 +28,9 @@ type OutboundMessage struct {
 // accepted, the writer loop routes everything to the Data lane instead of
 // attaching a QoS extension — the batcher itself doesn't special-case that.
 type Batcher struct {
-	batchSize  int
-	attachQoS  bool
-	initialSN  uint64
+	batchSize int
+	attachQoS bool
+	initialSN uint64
 
 	mu    sync.Mutex
 	lanes [8][2]*lane

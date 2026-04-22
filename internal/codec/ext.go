@@ -50,11 +50,11 @@ func (e ExtEncoding) String() string {
 
 // Extension header flag bits.
 const (
-	extFlagM byte = 1 << 4 // 0x10
-	extFlagZ byte = 1 << 7 // 0x80
-	extEncShift     = 5
-	extEncMask      = 0b11 << extEncShift
-	extIDMask  byte = 0x0F
+	extFlagM    byte = 1 << 4 // 0x10
+	extFlagZ    byte = 1 << 7 // 0x80
+	extEncShift      = 5
+	extEncMask       = 0b11 << extEncShift
+	extIDMask   byte = 0x0F
 )
 
 // ExtHeader is the decoded extension header byte.

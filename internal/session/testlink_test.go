@@ -4,7 +4,6 @@ import (
 	"errors"
 	"io"
 	"net"
-	"sync"
 
 	"github.com/shirou/zenoh-go-client/internal/codec"
 	"github.com/shirou/zenoh-go-client/internal/locator"
@@ -16,7 +15,6 @@ import (
 type pipeLink struct {
 	conn net.Conn
 	loc  locator.Locator
-	mu   sync.Mutex // serializes ReadBatch to match test expectations
 }
 
 func newPipeLink(conn net.Conn) *pipeLink {
@@ -40,7 +38,7 @@ func (l *pipeLink) WriteBatch(batch []byte) error {
 	return codec.EncodeStreamBatch(l.conn, batch)
 }
 
-func (l *pipeLink) Close() error                  { return l.conn.Close() }
+func (l *pipeLink) Close() error                   { return l.conn.Close() }
 func (l *pipeLink) RemoteLocator() locator.Locator { return l.loc }
 
 // newPipeLinks returns a pair (client, server) connected to each other.

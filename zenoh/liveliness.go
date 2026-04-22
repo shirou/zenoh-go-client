@@ -310,4 +310,3 @@ func (l *Liveliness) GetWithContext(ctx context.Context, keyExpr KeyExpr, opts *
 func (s *Session) runLivelinessCancel(ctx context.Context, timeout time.Duration, id uint32, translatorExited <-chan struct{}) {
 	runCancelWatcher(ctx, timeout, translatorExited, func() { s.inner.CancelLivelinessQuery(id) })
 }
-

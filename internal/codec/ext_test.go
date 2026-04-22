@@ -11,8 +11,8 @@ func TestExtHeaderPackUnpack(t *testing.T) {
 		wantB byte
 	}{
 		{ExtHeader{ID: 0x1, Encoding: ExtEncUnit}, 0x01},
-		{ExtHeader{ID: 0x3, Encoding: ExtEncZBuf, Mandatory: true}, 0x53},  // M=1, ENC=0b10
-		{ExtHeader{ID: 0x1, Encoding: ExtEncZ64, More: true}, 0xA1},         // Z=1, ENC=0b01
+		{ExtHeader{ID: 0x3, Encoding: ExtEncZBuf, Mandatory: true}, 0x53}, // M=1, ENC=0b10
+		{ExtHeader{ID: 0x1, Encoding: ExtEncZ64, More: true}, 0xA1},       // Z=1, ENC=0b01
 		{ExtHeader{ID: 0xF, Encoding: ExtEncZBuf, Mandatory: true, More: true}, 0xDF},
 	}
 	for _, tt := range tests {

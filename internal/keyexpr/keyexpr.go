@@ -7,10 +7,10 @@ import (
 
 // Wildcard tokens used throughout the package.
 const (
-	singleWild      = "*"
-	doubleWild      = "**"
-	delimiter       = "/"
-	forbiddenChars  = "#?$"
+	singleWild     = "*"
+	doubleWild     = "**"
+	delimiter      = "/"
+	forbiddenChars = "#?$"
 )
 
 // KeyExpr is a validated, canonical-form key expression. The zero value is

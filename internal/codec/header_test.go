@@ -4,8 +4,8 @@ import "testing"
 
 func TestHeaderPackUnpack(t *testing.T) {
 	tests := []struct {
-		h       Header
-		wantB   byte
+		h     Header
+		wantB byte
 	}{
 		{Header{ID: 0x01}, 0x01},
 		{Header{ID: 0x01, F1: true}, 0x21},

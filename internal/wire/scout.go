@@ -51,8 +51,8 @@ func (m WhatAmIMatcher) Matches(role WhatAmI) bool {
 //	ZID: (1+zid_len) bytes, present only when I==1
 //	[extensions] if Z==1
 type Scout struct {
-	Version    uint8
-	Matcher    WhatAmIMatcher
+	Version uint8
+	Matcher WhatAmIMatcher
 	// ZID is the scouter's ZenohID. When zero-value (len 0) the I flag is
 	// cleared and no bytes follow; otherwise it is emitted.
 	ZID        ZenohID
@@ -135,9 +135,9 @@ func DecodeScout(r *codec.Reader, h codec.Header) (*Scout, error) {
 //	  loc_count × <utf8;z8> locator strings
 //	[extensions] if Z==1
 type Hello struct {
-	Version    uint8
-	WhatAmI    WhatAmI
-	ZID        ZenohID
+	Version uint8
+	WhatAmI WhatAmI
+	ZID     ZenohID
 	// Locators is emitted inline when non-empty (L flag set).
 	Locators   []string
 	Extensions []codec.Extension

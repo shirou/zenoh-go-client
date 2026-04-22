@@ -33,15 +33,15 @@ const (
 
 // Declaration sub-message IDs (inside DECLARE body).
 const (
-	IDDeclareKeyExpr        byte = 0x00
-	IDUndeclareKeyExpr      byte = 0x01
-	IDDeclareSubscriber     byte = 0x02
-	IDUndeclareSubscriber   byte = 0x03
-	IDDeclareQueryable      byte = 0x04
-	IDUndeclareQueryable    byte = 0x05
-	IDDeclareToken          byte = 0x06
-	IDUndeclareToken        byte = 0x07
-	IDDeclareFinal          byte = 0x1A
+	IDDeclareKeyExpr      byte = 0x00
+	IDUndeclareKeyExpr    byte = 0x01
+	IDDeclareSubscriber   byte = 0x02
+	IDUndeclareSubscriber byte = 0x03
+	IDDeclareQueryable    byte = 0x04
+	IDUndeclareQueryable  byte = 0x05
+	IDDeclareToken        byte = 0x06
+	IDUndeclareToken      byte = 0x07
+	IDDeclareFinal        byte = 0x1A
 )
 
 // Data sub-message IDs (inside PUSH / REQUEST / RESPONSE body).

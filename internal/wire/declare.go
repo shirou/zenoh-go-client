@@ -21,10 +21,10 @@ const QueryableInfoExtID = 0x01
 //
 // Flags: I (interest_id present, bit 5) / reserved (bit 6) / Z (extensions).
 type Declare struct {
-	InterestID uint32 // populated only when the I flag is set
+	InterestID    uint32 // populated only when the I flag is set
 	HasInterestID bool
-	Extensions []codec.Extension
-	Body       DeclareBody
+	Extensions    []codec.Extension
+	Body          DeclareBody
 }
 
 // DeclareBody is one of the declaration sub-messages.
@@ -260,9 +260,9 @@ func decodeDeclareEntity(r *codec.Reader, h codec.Header, kind byte) (*DeclareEn
 // is mandatory so routers can drop entries without maintaining a reverse
 // index (spec declarations.adoc §WireExprExtension).
 type UndeclareEntity struct {
-	Kind       byte   // one of IDUndeclareSubscriber / Queryable / Token
+	Kind       byte // one of IDUndeclareSubscriber / Queryable / Token
 	EntityID   uint32
-	WireExpr   WireExpr // encoded inside extension 0x0F ZBuf payload
+	WireExpr   WireExpr          // encoded inside extension 0x0F ZBuf payload
 	Extensions []codec.Extension // other extensions (rare)
 }
 

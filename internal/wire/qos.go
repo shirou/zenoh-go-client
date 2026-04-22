@@ -37,14 +37,14 @@ const (
 	QoSPriorityData            QoSPriority = 5
 	QoSPriorityDataLow         QoSPriority = 6
 	QoSPriorityBackground      QoSPriority = 7
-	QoSPriorityDefault                      = QoSPriorityData
+	QoSPriorityDefault                     = QoSPriorityData
 )
 
 // QoS describes the QoS extension body for network messages.
 type QoS struct {
-	Priority   QoSPriority
-	DontDrop   bool // D: Block congestion control
-	Express    bool // E: bypass batching
+	Priority      QoSPriority
+	DontDrop      bool // D: Block congestion control
+	Express       bool // E: bypass batching
 	DontDropFirst bool // F: BlockFirst (Patch ≥ 1)
 }
 

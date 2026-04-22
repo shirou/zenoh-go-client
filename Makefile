@@ -16,7 +16,8 @@ fmt:
 
 lint:
 	go vet ./...
-	@command -v staticcheck >/dev/null 2>&1 && staticcheck ./... || echo "staticcheck not installed, skipping"
+	@test -z "$$(gofmt -l .)" || ( echo "Code is not formatted. Run 'make fmt'"; exit 1 )
+	go tool staticcheck ./...
 
 clean:
 	go clean ./...

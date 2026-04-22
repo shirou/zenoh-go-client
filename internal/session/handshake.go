@@ -13,13 +13,13 @@ import (
 // HandshakeConfig captures the locally-chosen parameters the initiator
 // proposes during INIT/OPEN.
 type HandshakeConfig struct {
-	ZID              wire.ZenohID
-	WhatAmI          wire.WhatAmI
-	BatchSize        uint16 // max batch size we are willing to receive
-	LeaseMillis      uint64 // lease duration we propose (milliseconds)
-	Resolution       wire.Resolution
-	EnableQoS        bool   // include QoS Unit ext in INIT SYN
-	MaxMessageSize   int    // cap for FRAGMENT reassembly
+	ZID            wire.ZenohID
+	WhatAmI        wire.WhatAmI
+	BatchSize      uint16 // max batch size we are willing to receive
+	LeaseMillis    uint64 // lease duration we propose (milliseconds)
+	Resolution     wire.Resolution
+	EnableQoS      bool // include QoS Unit ext in INIT SYN
+	MaxMessageSize int  // cap for FRAGMENT reassembly
 }
 
 // DefaultHandshakeConfig builds a config with the project-wide defaults
@@ -37,9 +37,9 @@ func DefaultHandshakeConfig() HandshakeConfig {
 
 // HandshakeResult is the negotiated post-handshake state both peers agreed on.
 type HandshakeResult struct {
-	PeerZID             wire.ZenohID
-	PeerWhatAmI         wire.WhatAmI
-	NegotiatedBatchSize uint16
+	PeerZID              wire.ZenohID
+	PeerWhatAmI          wire.WhatAmI
+	NegotiatedBatchSize  uint16
 	NegotiatedResolution wire.Resolution
 	// MyLeaseMillis / PeerLeaseMillis: each side proposes its own lease.
 	// Local keepalive cadence is derived from PeerLeaseMillis (we must send
@@ -51,7 +51,6 @@ type HandshakeResult struct {
 	PeerInitialSN   uint64
 	QoSEnabled      bool
 }
-
 
 // DoHandshake runs the 4-message INIT/OPEN exchange as the initiator.
 //

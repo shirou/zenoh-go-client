@@ -79,7 +79,7 @@ func TestMalformedFrameTruncatedSeqNum(t *testing.T) {
 func TestMalformedDeclareUnknownSubID(t *testing.T) {
 	// DECLARE header (Z=0, I=0) + sub-msg with unknown id 0x10.
 	r := codec.NewReader([]byte{
-		0x1E,              // DECLARE header (ID=0x1E)
+		0x1E,             // DECLARE header (ID=0x1E)
 		0x10, 0x00, 0x00, // fake sub-msg header + some bytes
 	})
 	h, _ := r.DecodeHeader()

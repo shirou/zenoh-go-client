@@ -59,10 +59,10 @@ func (p *peerRunLoop) run() {
 }
 
 // TestSessionRunHandshakeAndKeepalive:
-//   1. Client does DoHandshake against a mockPeer.
-//   2. Client runs Session.Run, which spins up reader/writer/keepalive.
-//   3. We verify at least one KEEPALIVE reaches the peer.
-//   4. Client.Close cleanly shuts everything down; goleak asserts no leaks.
+//  1. Client does DoHandshake against a mockPeer.
+//  2. Client runs Session.Run, which spins up reader/writer/keepalive.
+//  3. We verify at least one KEEPALIVE reaches the peer.
+//  4. Client.Close cleanly shuts everything down; goleak asserts no leaks.
 func TestSessionRunHandshakeAndKeepalive(t *testing.T) {
 	clientLink, serverLink := newPipeLinks()
 	defer clientLink.Close()
@@ -225,4 +225,3 @@ func TestSessionRunLinkDropTriggersShutdown(t *testing.T) {
 		t.Fatal(err)
 	}
 }
-

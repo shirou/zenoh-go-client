@@ -143,8 +143,8 @@ type livelinessQueryEntry struct {
 }
 
 type livelinessQueries struct {
-	mu       sync.RWMutex
-	byID     map[uint32]*livelinessQueryEntry
+	mu   sync.RWMutex
+	byID map[uint32]*livelinessQueryEntry
 }
 
 func (s *Session) regLivelinessQueries() *livelinessQueries {

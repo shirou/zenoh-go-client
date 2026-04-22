@@ -39,12 +39,12 @@ func TestNewRejectsMalformed(t *testing.T) {
 		"a/#/b",
 		"a/?/b",
 		"a/$/b",
-		"a**",    // partial-chunk wildcard not supported
-		"**a",    // same
+		"a**", // partial-chunk wildcard not supported
+		"**a", // same
 		"a*b",
-		"**/**",  // not canonical
+		"**/**", // not canonical
 		"a/**/**/b",
-		"**/*",   // not canonical (need */**)
+		"**/*", // not canonical (need */**)
 		"a/**/*",
 	}
 	for _, s := range bad {
@@ -106,8 +106,8 @@ func TestIntersects(t *testing.T) {
 		{"a/**/c", "a/b/d/c", true},
 		{"a/**/c", "a/b/d", false},
 		// Mutual wildcards
-		{"a/*", "*/b", true},  // matches "a/b"
-		{"*/a", "a/*", true},  // matches "a/a"
+		{"a/*", "*/b", true}, // matches "a/b"
+		{"*/a", "a/*", true}, // matches "a/a"
 		{"**", "**", true},
 		{"**", "a/b/c/d", true},
 	}

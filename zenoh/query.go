@@ -27,9 +27,9 @@ func (q *Query) Parameters() string { return q.parameters }
 // QueryReplyOptions sets per-reply fields. A nil *QueryReplyOptions is
 // treated as "all defaults".
 type QueryReplyOptions struct {
-	Encoding    Encoding
-	HasEncoding bool
-	TimeStamp   TimeStamp
+	Encoding     Encoding
+	HasEncoding  bool
+	TimeStamp    TimeStamp
 	HasTimeStamp bool
 }
 

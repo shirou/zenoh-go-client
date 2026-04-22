@@ -1044,9 +1044,9 @@ func TestGetConsolidationMonotonic(t *testing.T) {
 	}
 
 	router.injectReplyWithTS(t, req.requestID, "demo/mono/a", "a-v1", 100)
-	router.injectReplyWithTS(t, req.requestID, "demo/mono/a", "a-v2", 200) // accepted
+	router.injectReplyWithTS(t, req.requestID, "demo/mono/a", "a-v2", 200)    // accepted
 	router.injectReplyWithTS(t, req.requestID, "demo/mono/a", "a-stale", 150) // dropped
-	router.injectReplyWithTS(t, req.requestID, "demo/mono/a", "a-v3", 300)   // accepted
+	router.injectReplyWithTS(t, req.requestID, "demo/mono/a", "a-v3", 300)    // accepted
 	router.injectResponseFinal(t, req.requestID)
 
 	got := collectPayloads(t, replies, 2*time.Second)
@@ -1091,10 +1091,10 @@ func TestGetConsolidationMonotonicNoTimestamp(t *testing.T) {
 		t.Fatal("no REQUEST observed")
 	}
 
-	router.injectReply(t, req.requestID, "k", "a")               // no-ts — forward
-	router.injectReplyWithTS(t, req.requestID, "k", "b", 500)    // ts=500 — forward
-	router.injectReply(t, req.requestID, "k", "c")               // no-ts — forward
-	router.injectReplyWithTS(t, req.requestID, "k", "d", 300)    // ts=300 ≤ 500 — drop
+	router.injectReply(t, req.requestID, "k", "a")            // no-ts — forward
+	router.injectReplyWithTS(t, req.requestID, "k", "b", 500) // ts=500 — forward
+	router.injectReply(t, req.requestID, "k", "c")            // no-ts — forward
+	router.injectReplyWithTS(t, req.requestID, "k", "d", 300) // ts=300 ≤ 500 — drop
 	router.injectResponseFinal(t, req.requestID)
 
 	got := collectPayloads(t, replies, 2*time.Second)

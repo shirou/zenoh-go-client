@@ -30,3 +30,18 @@ jobs:
         with:
           version: latest
           install-go: false
+
+  # Multicast Scout against a host-networked zenohd. Separate job so a failure
+  # in the multicast path does not mask unrelated regressions in `test`.
+  interop-multicast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.26"
+          check-latest: true
+      - run: make interop-multicast-up
+      - run: go test -race -tags interop_multicast -count=1 -v ./tests/interop/...
+      - if: always()
+        run: make interop-multicast-down

@@ -21,6 +21,9 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
+
 	"github.com/shirou/zenoh-go-client/internal/codec"
 	"github.com/shirou/zenoh-go-client/internal/locator"
 	"github.com/shirou/zenoh-go-client/internal/wire"
@@ -29,6 +32,9 @@ import (
 // DefaultMulticastAddressV4 is the IPv4 multicast endpoint for zenoh SCOUT,
 // matching zenoh-rust's DEFAULT_MULTICAST_IPV4_ADDRESS.
 const DefaultMulticastAddressV4 = "224.0.0.224:7446"
+
+// DefaultMulticastAddressV6 is the IPv6 equivalent (link-local scope).
+const DefaultMulticastAddressV6 = "[ff02::224]:7446"
 
 // DefaultInterval is the SCOUT retransmission period.
 const DefaultInterval = time.Second
@@ -58,9 +64,25 @@ type Options struct {
 	// (or DefaultMulticastAddressV4) is added to the send list.
 	MulticastEnabled bool
 
-	// MulticastAddress is the "host:port" UDP target. Empty means
+	// MulticastAddress is the "host:port" UDP target. For IPv6 use the
+	// bracketed form, e.g. "[ff02::224]:7446". Empty means
 	// DefaultMulticastAddressV4. Ignored when MulticastEnabled is false.
 	MulticastAddress string
+
+	// MulticastInterface is the outgoing interface for multicast SCOUT and
+	// the interface on which the multicast listen socket (if enabled) joins
+	// the group. nil = OS default.
+	MulticastInterface *net.Interface
+
+	// MulticastTTL sets the IP multicast hop limit. 0 = OS default (1 on
+	// most systems — link-local only).
+	MulticastTTL int
+
+	// MulticastListen, when true, binds an additional socket to the
+	// multicast group + port and joins the group so periodic multicast
+	// HELLO advertisements from other peers are observed (in addition to
+	// unicast replies on the sender socket).
+	MulticastListen bool
 
 	// UnicastAddresses is a list of "host:port" UDP targets to SCOUT
 	// directly, in addition to (or instead of) the multicast target.
@@ -84,10 +106,11 @@ type Options struct {
 
 // Run sends SCOUT messages and delivers each unique HELLO (deduplicated by
 // ZID) via deliver. It returns when ctx is cancelled, the timeout elapses, or
-// an unrecoverable socket error occurs.
+// socket setup fails.
 //
-// deliver runs on Run's receive goroutine; to avoid stalling the receive loop,
-// fan out by queuing into a channel or launching a goroutine inside deliver.
+// deliver is serialised across all receive sockets and may be called for any
+// HELLO whose ZID has not yet been seen. Callers that perform heavy work
+// inside deliver should push into a channel to avoid stalling the receivers.
 func Run(ctx context.Context, opts Options, deliver func(Hello)) error {
 	interval := opts.Interval
 	if interval <= 0 {
@@ -102,12 +125,14 @@ func Run(ctx context.Context, opts Options, deliver func(Hello)) error {
 		matcher = wire.MatcherAny
 	}
 
-	targets, err := resolveTargets(opts)
+	plan, err := planSockets(opts)
 	if err != nil {
 		return err
 	}
-	if len(targets) == 0 {
-		return errors.New("scout: no multicast or unicast targets configured")
+	hasSend := len(plan.targetsV4)+len(plan.targetsV6) > 0
+	hasListen := opts.MulticastListen && (plan.mcastV4 != nil || plan.mcastV6 != nil)
+	if !hasSend && !hasListen {
+		return errors.New("scout: no multicast/unicast targets and no multicast listener configured")
 	}
 
 	body, err := encodeScout(opts.ZID, matcher)
@@ -115,11 +140,11 @@ func Run(ctx context.Context, opts Options, deliver func(Hello)) error {
 		return fmt.Errorf("scout: encode SCOUT: %w", err)
 	}
 
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	sockets, err := openSockets(plan, opts)
 	if err != nil {
-		return fmt.Errorf("scout: listen udp4: %w", err)
+		return err
 	}
-	defer conn.Close()
+	defer sockets.closeAll()
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -129,43 +154,184 @@ func Run(ctx context.Context, opts Options, deliver func(Hello)) error {
 		defer deadlineCancel()
 	}
 
-	var wg sync.WaitGroup
-	wg.Go(func() {
-		sendLoop(runCtx, conn, body, targets, interval)
-	})
+	dispatcher := newDispatcher(opts.ZID, deliver)
 
-	// When the run context finishes, unblock ReadFromUDP by setting an
-	// already-elapsed deadline. The sender goroutine honours ctx directly.
+	var wg sync.WaitGroup
+	if sockets.sendV4 != nil {
+		wg.Go(func() { sendLoop(runCtx, sockets.sendV4, body, plan.targetsV4, interval) })
+	}
+	if sockets.sendV6 != nil {
+		wg.Go(func() { sendLoop(runCtx, sockets.sendV6, body, plan.targetsV6, interval) })
+	}
+	for _, c := range sockets.conns() {
+		wg.Go(func() { readLoop(c, dispatcher) })
+	}
 	wg.Go(func() {
 		<-runCtx.Done()
-		_ = conn.SetReadDeadline(time.Now())
+		sockets.unblockReaders()
 	})
 
-	defer wg.Wait()
-	return receiveLoop(conn, opts.ZID, deliver)
+	wg.Wait()
+	return nil
 }
 
-func resolveTargets(opts Options) ([]*net.UDPAddr, error) {
-	var targets []*net.UDPAddr
-	if opts.MulticastEnabled {
+type socketPlan struct {
+	targetsV4 []*net.UDPAddr
+	targetsV6 []*net.UDPAddr
+	mcastV4   *net.UDPAddr // non-nil when a v4 multicast group is in play (send or listen)
+	mcastV6   *net.UDPAddr
+}
+
+func planSockets(opts Options) (*socketPlan, error) {
+	p := &socketPlan{}
+	// A multicast address is resolved if we'll either send to it or listen
+	// on the group. MulticastListen without MulticastEnabled yields a
+	// passive observer — no SCOUT is transmitted, but multicast HELLO
+	// advertisements still reach the read loop.
+	if opts.MulticastEnabled || opts.MulticastListen {
 		addr := opts.MulticastAddress
 		if addr == "" {
 			addr = DefaultMulticastAddressV4
 		}
-		u, err := net.ResolveUDPAddr("udp4", addr)
+		u, err := net.ResolveUDPAddr("udp", addr)
 		if err != nil {
 			return nil, fmt.Errorf("scout: resolve multicast %q: %w", addr, err)
 		}
-		targets = append(targets, u)
+		if u.IP.To4() != nil {
+			p.mcastV4 = u
+			if opts.MulticastEnabled {
+				p.targetsV4 = append(p.targetsV4, u)
+			}
+		} else {
+			p.mcastV6 = u
+			if opts.MulticastEnabled {
+				p.targetsV6 = append(p.targetsV6, u)
+			}
+		}
 	}
 	for _, s := range opts.UnicastAddresses {
-		u, err := net.ResolveUDPAddr("udp4", s)
+		u, err := net.ResolveUDPAddr("udp", s)
 		if err != nil {
 			return nil, fmt.Errorf("scout: resolve unicast %q: %w", s, err)
 		}
-		targets = append(targets, u)
+		if u.IP.To4() != nil {
+			p.targetsV4 = append(p.targetsV4, u)
+		} else {
+			p.targetsV6 = append(p.targetsV6, u)
+		}
 	}
-	return targets, nil
+	return p, nil
+}
+
+type openedSockets struct {
+	sendV4   *net.UDPConn
+	sendV6   *net.UDPConn
+	listenV4 *net.UDPConn
+	listenV6 *net.UDPConn
+}
+
+func (s *openedSockets) conns() []*net.UDPConn {
+	out := make([]*net.UDPConn, 0, 4)
+	for _, c := range []*net.UDPConn{s.sendV4, s.sendV6, s.listenV4, s.listenV6} {
+		if c != nil {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func (s *openedSockets) closeAll() {
+	for _, c := range s.conns() {
+		_ = c.Close()
+	}
+}
+
+// unblockReaders nudges every read loop out of ReadFromUDP by setting an
+// already-elapsed deadline. Readers treat the resulting timeout as a clean
+// shutdown signal, so this runs before closeAll to avoid racing a close
+// with an in-flight Read.
+func (s *openedSockets) unblockReaders() {
+	now := time.Now()
+	for _, c := range s.conns() {
+		_ = c.SetReadDeadline(now)
+	}
+}
+
+func openSockets(plan *socketPlan, opts Options) (*openedSockets, error) {
+	out := &openedSockets{}
+	var err error
+	defer func() {
+		if err != nil {
+			out.closeAll()
+		}
+	}()
+
+	if len(plan.targetsV4) > 0 {
+		out.sendV4, err = net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+		if err != nil {
+			return nil, fmt.Errorf("scout: listen udp4: %w", err)
+		}
+		if err = applyMulticastOpts(out.sendV4, false, opts); err != nil {
+			return nil, err
+		}
+	}
+	if len(plan.targetsV6) > 0 {
+		out.sendV6, err = net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6unspecified, Port: 0})
+		if err != nil {
+			return nil, fmt.Errorf("scout: listen udp6: %w", err)
+		}
+		if err = applyMulticastOpts(out.sendV6, true, opts); err != nil {
+			return nil, err
+		}
+	}
+	if opts.MulticastListen && plan.mcastV4 != nil {
+		out.listenV4, err = net.ListenMulticastUDP("udp4", opts.MulticastInterface, plan.mcastV4)
+		if err != nil {
+			return nil, fmt.Errorf("scout: listen multicast v4: %w", err)
+		}
+	}
+	if opts.MulticastListen && plan.mcastV6 != nil {
+		out.listenV6, err = net.ListenMulticastUDP("udp6", opts.MulticastInterface, plan.mcastV6)
+		if err != nil {
+			return nil, fmt.Errorf("scout: listen multicast v6: %w", err)
+		}
+	}
+	return out, nil
+}
+
+// applyMulticastOpts applies TTL / outgoing-interface overrides to a send
+// socket. IPv4 and IPv6 use separate x/net PacketConn types that share the
+// same method shape, so one helper covers both.
+func applyMulticastOpts(c *net.UDPConn, isV6 bool, opts Options) error {
+	if opts.MulticastTTL == 0 && opts.MulticastInterface == nil {
+		return nil
+	}
+	if isV6 {
+		p := ipv6.NewPacketConn(c)
+		if opts.MulticastTTL > 0 {
+			if err := p.SetMulticastHopLimit(opts.MulticastTTL); err != nil {
+				return fmt.Errorf("scout: set v6 multicast hop limit: %w", err)
+			}
+		}
+		if opts.MulticastInterface != nil {
+			if err := p.SetMulticastInterface(opts.MulticastInterface); err != nil {
+				return fmt.Errorf("scout: set v6 multicast interface: %w", err)
+			}
+		}
+		return nil
+	}
+	p := ipv4.NewPacketConn(c)
+	if opts.MulticastTTL > 0 {
+		if err := p.SetMulticastTTL(opts.MulticastTTL); err != nil {
+			return fmt.Errorf("scout: set v4 multicast TTL: %w", err)
+		}
+	}
+	if opts.MulticastInterface != nil {
+		if err := p.SetMulticastInterface(opts.MulticastInterface); err != nil {
+			return fmt.Errorf("scout: set v4 multicast interface: %w", err)
+		}
+	}
+	return nil
 }
 
 func sendLoop(ctx context.Context, conn *net.UDPConn, body []byte, targets []*net.UDPAddr, interval time.Duration) {
@@ -189,21 +355,54 @@ func sendLoop(ctx context.Context, conn *net.UDPConn, body []byte, targets []*ne
 	}
 }
 
-func receiveLoop(conn *net.UDPConn, selfZID wire.ZenohID, deliver func(Hello)) error {
-	seen := make(map[string]struct{})
+// dispatcher serialises HELLO delivery across multiple receive sockets and
+// drops HELLOs whose ZIDs have already been reported.
+type dispatcher struct {
+	mu      sync.Mutex
+	seen    map[string]struct{}
+	selfZID wire.ZenohID
+	deliver func(Hello)
+}
+
+func newDispatcher(selfZID wire.ZenohID, deliver func(Hello)) *dispatcher {
+	return &dispatcher{
+		seen:    make(map[string]struct{}),
+		selfZID: selfZID,
+		deliver: deliver,
+	}
+}
+
+// tryDeliver deduplicates by ZID and invokes deliver under the dispatcher's
+// mutex so user callbacks observe a well-defined order even when multiple
+// sockets receive HELLOs concurrently.
+func (d *dispatcher) tryDeliver(h Hello) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.selfZID.IsValid() && h.ZID.Equal(d.selfZID) {
+		return
+	}
+	key := string(h.ZID.Bytes)
+	if _, dup := d.seen[key]; dup {
+		return
+	}
+	d.seen[key] = struct{}{}
+	d.deliver(h)
+}
+
+func readLoop(conn *net.UDPConn, d *dispatcher) {
 	buf := make([]byte, readBufSize)
 	for {
 		n, src, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			var ne net.Error
 			if errors.As(err, &ne) && ne.Timeout() {
-				// Deadline set by the shutdown watchdog goroutine.
-				return nil
+				return
 			}
 			if errors.Is(err, net.ErrClosed) {
-				return nil
+				return
 			}
-			return fmt.Errorf("scout: read: %w", err)
+			slog.Default().Debug("scout: read failed", "err", err)
+			return
 		}
 		h, err := decodeHello(buf[:n], src)
 		if err != nil {
@@ -211,15 +410,7 @@ func receiveLoop(conn *net.UDPConn, selfZID wire.ZenohID, deliver func(Hello)) e
 				"src", src.String(), "err", err)
 			continue
 		}
-		if selfZID.IsValid() && h.ZID.Equal(selfZID) {
-			continue
-		}
-		key := string(h.ZID.Bytes)
-		if _, dup := seen[key]; dup {
-			continue
-		}
-		seen[key] = struct{}{}
-		deliver(h)
+		d.tryDeliver(h)
 	}
 }
 

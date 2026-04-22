@@ -1,0 +1,18 @@
+# Multicast-enabled zenohd for Scout interop tests.
+#
+# Uses host networking so the container's multicast traffic is reachable from
+# the host where `go test` runs. Linux only — docker `network_mode: host` is a
+# no-op on macOS/Windows and multicast will not traverse the bridge.
+services:
+  zenohd-multicast:
+    image: eclipse/zenoh:1.0.0
+    network_mode: host
+    command:
+      - "--listen=tcp/0.0.0.0:7447"
+    environment:
+      RUST_LOG: "zenoh=info"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "7447"]
+      interval: 2s
+      timeout: 2s
+      retries: 15

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"slices"
 	"time"
 
@@ -148,13 +149,25 @@ func buildScoutOptions(config Config, options *ScoutOptions) (scout.Options, err
 		timeout = sc.Timeout
 	}
 
+	var iface *net.Interface
+	if sc.MulticastInterface != "" {
+		i, err := net.InterfaceByName(sc.MulticastInterface)
+		if err != nil {
+			return scout.Options{}, fmt.Errorf("zenoh: Scout interface %q: %w", sc.MulticastInterface, err)
+		}
+		iface = i
+	}
+
 	return scout.Options{
-		MulticastEnabled: sc.MulticastMode != MulticastOff,
-		MulticastAddress: mcastAddr,
-		UnicastAddresses: unicast,
-		Matcher:          wire.WhatAmIMatcher(what),
-		ZID:              zid,
-		Timeout:          timeout,
+		MulticastEnabled:   sc.MulticastMode != MulticastOff,
+		MulticastAddress:   mcastAddr,
+		MulticastInterface: iface,
+		MulticastTTL:       sc.MulticastTTL,
+		MulticastListen:    sc.MulticastListen,
+		UnicastAddresses:   unicast,
+		Matcher:            wire.WhatAmIMatcher(what),
+		ZID:                zid,
+		Timeout:            timeout,
 	}, nil
 }
 

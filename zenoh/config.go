@@ -46,8 +46,23 @@ type ScoutingConfig struct {
 	MulticastMode MulticastMode
 
 	// MulticastAddress is the "host:port" UDP target (or "udp/host:port").
+	// For IPv6 use the bracketed form, e.g. "[ff02::224]:7446".
 	// Empty = default (224.0.0.224:7446).
 	MulticastAddress string
+
+	// MulticastInterface names the outgoing network interface (e.g. "eth0")
+	// for multicast SCOUT and group membership. Empty = OS default.
+	MulticastInterface string
+
+	// MulticastTTL sets the multicast hop limit. 0 = OS default (typically
+	// 1, i.e. link-local only).
+	MulticastTTL int
+
+	// MulticastListen, when true, opens an additional socket bound to the
+	// multicast group + port so periodic HELLO advertisements from other
+	// peers are observed. Unicast replies to our own SCOUT are received
+	// regardless of this flag.
+	MulticastListen bool
 
 	// Timeout is the overall Scout duration. 0 = default (3s).
 	Timeout time.Duration

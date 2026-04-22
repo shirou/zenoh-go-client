@@ -44,6 +44,9 @@ type Session struct {
 
 	inboundTokensOnce sync.Once
 	inboundTokens     *inboundTokens
+
+	matchingOnce sync.Once
+	matching     *matchingRegistry
 }
 
 // Option configures a Session at construction time.

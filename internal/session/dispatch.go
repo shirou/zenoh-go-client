@@ -140,21 +140,13 @@ func cloneErrBody(e *wire.ErrBody) *wire.ErrBody {
 // onDeclare routes an inbound DECLARE message. Handled sub-messages:
 //   - D_KEYEXPR / U_KEYEXPR maintain the receive-side alias table so any
 //     later WireExpr with Scope != 0 can be resolved.
+//   - D_SUBSCRIBER / U_SUBSCRIBER and D_QUERYABLE / U_QUERYABLE drive the
+//     matching registry (Publisher / Querier MatchingListener).
 //   - D_TOKEN / U_TOKEN fan out to matching liveliness subscribers and
 //     (when the DECLARE carries an interest_id from a live liveliness Get)
 //     to that query's reply channel.
-//   - D_FINAL with an interest_id closes the matching liveliness Get's
-//     reply channel.
-//
-// Intentionally dropped without logging:
-//   - D_SUBSCRIBER / U_SUBSCRIBER
-//   - D_QUERYABLE / U_QUERYABLE
-//   - D_INTEREST / D_ENTITY for kinds other than Token
-//
-// A router advertising its own subscribers / queryables back to a
-// client-mode session is valid wire traffic but has no effect on us;
-// logging each one would be noise on a busy network. Extending any of
-// these to routed / peer mode is a separate feature task.
+//   - D_FINAL with an interest_id completes either a matching INTEREST's
+//     initial snapshot or a liveliness Get's reply stream.
 func (s *Session) onDeclare(d *wire.Declare) error {
 	switch body := d.Body.(type) {
 	case *wire.DeclareKeyExpr:
@@ -162,19 +154,70 @@ func (s *Session) onDeclare(d *wire.Declare) error {
 	case *wire.UndeclareKeyExpr:
 		s.undeclareRemoteAlias(body.ExprID)
 	case *wire.DeclareEntity:
-		if body.Kind == wire.IDDeclareToken {
+		switch body.Kind {
+		case wire.IDDeclareToken:
 			return s.onTokenDeclare(d, body)
+		case wire.IDDeclareSubscriber:
+			return s.onMatchingEntityDeclare(MatchingSubscribers, body)
+		case wire.IDDeclareQueryable:
+			return s.onMatchingEntityDeclare(MatchingQueryables, body)
 		}
 	case *wire.UndeclareEntity:
-		if body.Kind == wire.IDUndeclareToken {
+		switch body.Kind {
+		case wire.IDUndeclareToken:
 			return s.onTokenUndeclare(body)
+		case wire.IDUndeclareSubscriber:
+			return s.onMatchingEntityUndeclare(MatchingSubscribers, body)
+		case wire.IDUndeclareQueryable:
+			return s.onMatchingEntityUndeclare(MatchingQueryables, body)
 		}
 	case *wire.DeclareFinal:
 		if d.HasInterestID {
-			s.finaliseLivelinessQuery(d.InterestID)
+			// A DeclareFinal carrying an interest_id terminates exactly
+			// one outstanding INTEREST. Try matching first (Publisher /
+			// Querier); fall back to liveliness Get.
+			if !s.onMatchingSnapshotDone(d.InterestID) {
+				s.finaliseLivelinessQuery(d.InterestID)
+			}
 		}
 	}
 	return nil
+}
+
+// onMatchingEntityDeclare resolves the incoming key expression (honouring
+// receive-side aliases) and feeds it into the matching registry.
+func (s *Session) onMatchingEntityDeclare(kind MatchingKind, body *wire.DeclareEntity) error {
+	ke, err := s.resolveMatchingKey(body.KeyExpr, kind, "declare")
+	if err != nil || ke.IsZero() {
+		return err
+	}
+	s.onMatchingDeclare(kind, ke)
+	return nil
+}
+
+func (s *Session) onMatchingEntityUndeclare(kind MatchingKind, body *wire.UndeclareEntity) error {
+	ke, err := s.resolveMatchingKey(body.WireExpr, kind, "undeclare")
+	if err != nil || ke.IsZero() {
+		return err
+	}
+	s.onMatchingUndeclare(kind, ke)
+	return nil
+}
+
+func (s *Session) resolveMatchingKey(w wire.WireExpr, kind MatchingKind, op string) (keyexpr.KeyExpr, error) {
+	full, ok := s.resolveRemoteKey(w)
+	if !ok || full == "" {
+		// Router sent an unresolvable alias. Log once and ignore; the next
+		// D_KEYEXPR should repair the table.
+		s.logger.Warn("dispatch: matching entity with unknown alias",
+			"kind", kind, "op", op, "scope", w.Scope)
+		return keyexpr.KeyExpr{}, nil
+	}
+	ke, err := keyexpr.New(full)
+	if err != nil {
+		return keyexpr.KeyExpr{}, fmt.Errorf("dispatch matching %s: invalid key %q: %w", op, full, err)
+	}
+	return ke, nil
 }
 
 func (s *Session) onTokenDeclare(d *wire.Declare, body *wire.DeclareEntity) error {

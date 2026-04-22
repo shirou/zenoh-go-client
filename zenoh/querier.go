@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/shirou/zenoh-go-client/internal/session"
 	"github.com/shirou/zenoh-go-client/internal/wire"
 )
 
@@ -66,11 +67,13 @@ func (s *Session) DeclareQuerier(keyExpr KeyExpr, opts *QuerierOptions) (*Querie
 	s.queriersMu.Lock()
 	s.queriers[id] = &querierState{keyExpr: keyExpr, opts: *opts}
 	s.queriersMu.Unlock()
+	s.inner.RegisterMatching(id, keyExpr.internalKeyExpr(), session.MatchingQueryables)
 
 	if err := s.sendQuerierInterest(id, keyExpr); err != nil {
 		s.queriersMu.Lock()
 		delete(s.queriers, id)
 		s.queriersMu.Unlock()
+		s.inner.UnregisterMatching(id)
 		return nil, fmt.Errorf("send INTEREST: %w", err)
 	}
 	return &Querier{session: s, keyExpr: keyExpr, opts: *opts, interestID: id}, nil
@@ -110,6 +113,7 @@ func (q *Querier) Drop() {
 	q.session.queriersMu.Lock()
 	delete(q.session.queriers, q.interestID)
 	q.session.queriersMu.Unlock()
+	q.session.inner.UnregisterMatching(q.interestID)
 	_ = q.session.sendInterestFinal(q.interestID)
 }
 

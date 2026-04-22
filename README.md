@@ -99,6 +99,33 @@ for r := range replies {
 }
 ```
 
+### Matching Listener
+
+```go
+pub, _ := session.DeclarePublisher(ke, nil)
+defer pub.Drop()
+
+listener, _ := pub.DeclareMatchingListener(zenoh.NewFifoChannel[zenoh.MatchingStatus](4))
+defer listener.Drop()
+
+for st := range listener.Handler() {
+    fmt.Println("matching subscribers present:", st.Matching)
+}
+```
+
+### Scout
+
+```go
+cfg := zenoh.NewConfig() // multicast on 224.0.0.224:7446 by default
+ch, _ := zenoh.Scout(cfg, zenoh.NewFifoChannel[zenoh.Hello](8), &zenoh.ScoutOptions{
+    TimeoutMs: 3000,
+    What:      zenoh.WhatRouter | zenoh.WhatPeer,
+})
+for hello := range ch {
+    fmt.Printf("discovered %s %s %v\n", hello.WhatAmI(), hello.ZId(), hello.Locators())
+}
+```
+
 Runnable variants live under [`examples/`](examples/):
 `z_pub`, `z_sub`, `z_get`, `z_queryable`, `z_liveliness`.
 
@@ -187,6 +214,32 @@ Runnable variants live under [`examples/`](examples/):
   Liveliness Subscriber path (zenohd uses scoped expressions when
   forwarding D_TOKEN, so this is required for interop).
 
+### Matching Listener
+
+- `Publisher.DeclareMatchingListener(handler)` — fires when the set of
+  matching Subscribers transitions between empty and non-empty. Emits
+  `INTEREST[Mode=CurrentFuture, K+S, restricted=keyExpr]` on declare
+  and `INTEREST[Final]` on Drop. The first delivery arrives when the
+  router's initial snapshot completes (`DeclareFinal`), reflecting the
+  current count; subsequent deliveries fire only on 0↔1 transitions.
+- `Querier.DeclareMatchingListener(handler)` — same semantics over
+  matching Queryables.
+- `DeclareBackgroundMatchingListener(Closure)` for fire-and-forget use.
+- `GetMatchingStatus()` reads the current flag synchronously.
+- Auto-replayed on reconnect: matching counts reset, INTEREST is
+  re-emitted, and listeners re-receive the fresh snapshot.
+
+### Discovery (Scout)
+
+- `zenoh.Scout(config, handler, options)` — UDP SCOUT / HELLO over
+  IPv4 or IPv6 multicast (default group `224.0.0.224:7446`). Supports
+  unicast targets from `config.Endpoints` (entries beginning with
+  `udp/`), outgoing-interface selection, TTL override, and an optional
+  listen socket for observing passive HELLO advertisements.
+- Background vs foreground is chosen by handler kind: `Closure` blocks,
+  `FifoChannel` / `RingChannel` return a channel immediately and close
+  it on timeout.
+
 ### Context / cancellation
 
 - `Open(ctx, cfg)` — ctx bounds the dial + handshake
@@ -214,10 +267,9 @@ Runnable variants live under [`examples/`](examples/):
 
 Not yet implemented, in rough priority order:
 
-- **Matching Listener** on publishers — notifications when subscribers
-  appear/disappear (reuses the INTEREST plumbing)
-- **Scout** — UDP multicast SCOUT / HELLO discovery (byte-level codec is
-  already written; UDP transport and scout state machine are not)
+- **Scout enhancements** — IPv6 fully but `MulticastInterface` / TTL
+  exercised only on IPv4; periodic-advertisement emitter not yet ported
+  (we only listen for them when `MulticastListen` is set)
 - **`D_KEYEXPR` send side** — today we resolve inbound aliases but never
   declare our own; a send-side implementation shrinks outbound messages
   by letting the router reuse a scope id for a long key expression
@@ -247,6 +299,15 @@ Not yet implemented, in rough priority order:
 make interop-up    # build the Python test image + start zenohd
 make interop-test  # go test -race -tags interop ./tests/interop/...
 make interop-down
+```
+
+The Scout test uses a host-networked zenohd (Linux only) so multicast
+traffic reaches the Go process running on the host:
+
+```sh
+make interop-multicast-up
+make interop-multicast-test
+make interop-multicast-down
 ```
 
 ## License

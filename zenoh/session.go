@@ -47,6 +47,12 @@ type Session struct {
 	queriersMu sync.Mutex
 	queriers   map[uint32]*querierState
 
+	// publishers tracks Publisher INTEREST state for reconnect replay.
+	// Matching state itself lives on inner.matchingRegistry; this map
+	// only remembers enough to re-emit the INTEREST on a fresh link.
+	publishersMu sync.Mutex
+	publishers   map[uint32]*publisherState
+
 	// livelinessSubsReplay keeps enough state per liveliness subscriber
 	// to re-emit its INTEREST on a fresh link (keyExpr + history flag).
 	// The inner session owns the actual deliver callback.
@@ -82,6 +88,7 @@ func Open(ctx context.Context, cfg Config) (*Session, error) {
 		done:                 make(chan struct{}),
 		tokens:               make(map[uint32]KeyExpr),
 		queriers:             make(map[uint32]*querierState),
+		publishers:           make(map[uint32]*publisherState),
 		livelinessSubsReplay: make(map[uint32]livelinessSubReplayState),
 	}
 
@@ -272,6 +279,10 @@ func (s *Session) userCloseCtx() context.Context {
 func (s *Session) replayEntities() error {
 	s.inner.ResetRemoteAliases()
 	s.inner.ResetInboundTokens()
+	// Matching counts/flags are tied to the old router's INTEREST snapshot;
+	// clear them so the fresh link's snapshot-complete re-delivers the
+	// correct state. Listeners survive the reset.
+	s.inner.ResetMatching()
 
 	var plan []replayEntry
 
@@ -303,6 +314,14 @@ func (s *Session) replayEntities() error {
 		}})
 	}
 	s.queriersMu.Unlock()
+	s.publishersMu.Lock()
+	for id, p := range s.publishers {
+		ke := p.keyExpr
+		plan = append(plan, replayEntry{id, "INTEREST[publisher]", func() error {
+			return s.sendPublisherInterest(id, ke)
+		}})
+	}
+	s.publishersMu.Unlock()
 	s.livelinessSubsMu.Lock()
 	for id, st := range s.livelinessSubsReplay {
 		ke := st.keyExpr

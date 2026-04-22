@@ -33,6 +33,17 @@ type Session struct {
 	qbls     *queryables
 	getsOnce sync.Once
 	gets     *gets
+
+	livelinessSubsOnce    sync.Once
+	livelinessSubs        *livelinessSubs
+	livelinessQueriesOnce sync.Once
+	livelinessQueries     *livelinessQueries
+
+	remoteAliasesOnce sync.Once
+	remoteAliases     *remoteAliases
+
+	inboundTokensOnce sync.Once
+	inboundTokens     *inboundTokens
 }
 
 // Option configures a Session at construction time.

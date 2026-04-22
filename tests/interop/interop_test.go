@@ -425,6 +425,66 @@ func TestGoLivelinessPyGet(t *testing.T) {
 	}
 }
 
+// TestPyLivelinessTokenGoSubscriber: Python declares a liveliness token;
+// Go LivelinessSubscriber sees it as a Put Sample, and when Python
+// drops the token Go sees a Delete Sample.
+func TestPyLivelinessTokenGoSubscriber(t *testing.T) {
+	requireZenohd(t)
+
+	const key = "interop/live/py2go"
+
+	session := openGoSession(t)
+	defer session.Close()
+
+	ke, err := zenoh.NewKeyExpr(key)
+	if err != nil {
+		t.Fatalf("NewKeyExpr: %v", err)
+	}
+	ch := make(chan zenoh.Sample, 4)
+	sub, err := session.Liveliness().DeclareSubscriber(ke, zenoh.Closure[zenoh.Sample]{
+		Call: func(s zenoh.Sample) { ch <- s },
+	}, &zenoh.LivelinessSubscriberOptions{History: true})
+	if err != nil {
+		t.Fatalf("DeclareSubscriber: %v", err)
+	}
+	defer sub.Drop()
+
+	// Router must receive & propagate the INTEREST before Python declares.
+	time.Sleep(200 * time.Millisecond)
+
+	tok := startPython(t, "python_liveliness_token.py", "--key", key)
+	defer tok.close(t)
+	tok.waitFor(t, readyMarker, readyTimeout)
+
+	// First event: alive.
+	select {
+	case s := <-ch:
+		if s.Kind() != zenoh.SampleKindPut {
+			t.Errorf("first event kind=%v, want Put", s.Kind())
+		}
+		if s.KeyExpr().String() != key {
+			t.Errorf("first event key=%q, want %q", s.KeyExpr(), key)
+		}
+	case <-time.After(ioTimeout):
+		t.Fatal("no liveliness Put event within ioTimeout")
+	}
+
+	// Tell Python to drop the token → expect Delete event.
+	if _, err := io.WriteString(tok.stdin, "DROP\n"); err != nil {
+		t.Fatalf("signal drop: %v", err)
+	}
+	tok.waitFor(t, doneMarker, ioTimeout)
+
+	select {
+	case s := <-ch:
+		if s.Kind() != zenoh.SampleKindDelete {
+			t.Errorf("second event kind=%v, want Delete", s.Kind())
+		}
+	case <-time.After(ioTimeout):
+		t.Fatal("no liveliness Delete event within ioTimeout")
+	}
+}
+
 // TestPyGetGoQueryable: Python sends Get; Go queryable replies.
 func TestPyGetGoQueryable(t *testing.T) {
 	requireZenohd(t)

@@ -47,6 +47,12 @@ type Session struct {
 	queriersMu sync.Mutex
 	queriers   map[uint32]*querierState
 
+	// livelinessSubsReplay keeps enough state per liveliness subscriber
+	// to re-emit its INTEREST on a fresh link (keyExpr + history flag).
+	// The inner session owns the actual deliver callback.
+	livelinessSubsMu     sync.Mutex
+	livelinessSubsReplay map[uint32]livelinessSubReplayState
+
 	// userCtx is a context derived from UserCloseCh, lazily built and
 	// cached. Used by dialContext to cancel in-flight dials on Close.
 	userCtxOnce sync.Once
@@ -69,13 +75,14 @@ func Open(ctx context.Context, cfg Config) (*Session, error) {
 
 	inner := session.New()
 	s := &Session{
-		cfg:      cfg,
-		backoff:  reconnectConfigFromUser(cfg),
-		inner:    inner,
-		zid:      zid,
-		done:     make(chan struct{}),
-		tokens:   make(map[uint32]KeyExpr),
-		queriers: make(map[uint32]*querierState),
+		cfg:                  cfg,
+		backoff:              reconnectConfigFromUser(cfg),
+		inner:                inner,
+		zid:                  zid,
+		done:                 make(chan struct{}),
+		tokens:               make(map[uint32]KeyExpr),
+		queriers:             make(map[uint32]*querierState),
+		livelinessSubsReplay: make(map[uint32]livelinessSubReplayState),
 	}
 
 	rt, err := s.dialAndRun(ctx)
@@ -257,7 +264,15 @@ func (s *Session) userCloseCtx() context.Context {
 // its own lock released before any send fires — holding a registry lock
 // across a blocking enqueueNetwork would serialise declare / undeclare
 // calls for the full duration of replay.
+//
+// Inbound-only caches (remote ExprID aliases, router-assigned token
+// entity_ids) are wiped first: the new session starts from a blank
+// namespace, so keeping stale mappings risks resolving a future
+// D_KEYEXPR / U_TOKEN to the wrong key.
 func (s *Session) replayEntities() error {
+	s.inner.ResetRemoteAliases()
+	s.inner.ResetInboundTokens()
+
 	var plan []replayEntry
 
 	s.inner.ForEachSubscriber(func(id uint32, ke intkeyexpr.KeyExpr) {
@@ -288,6 +303,15 @@ func (s *Session) replayEntities() error {
 		}})
 	}
 	s.queriersMu.Unlock()
+	s.livelinessSubsMu.Lock()
+	for id, st := range s.livelinessSubsReplay {
+		ke := st.keyExpr
+		history := st.history
+		plan = append(plan, replayEntry{id, "INTEREST[liveliness]", func() error {
+			return s.sendLivelinessSubscriberInterest(id, ke, history)
+		}})
+	}
+	s.livelinessSubsMu.Unlock()
 
 	var errs []error
 	for _, e := range plan {

@@ -204,6 +204,7 @@ func (s *Session) Run(cfg RunConfig) (*Runtime, error) {
 		// goroutines exit. A subsequent Run() on this Session starts
 		// fresh — Gets do not survive across Runtimes.
 		s.cancelAllGets()
+		s.cancelAllLivelinessQueries()
 	}()
 
 	return rt, nil

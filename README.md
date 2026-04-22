@@ -172,8 +172,20 @@ Runnable variants live under [`examples/`](examples/):
 
 ### Liveliness
 
-- `Session.Liveliness().DeclareToken(keyExpr, nil)` → `LivelinessToken`
-- Tokens participate in auto-reconnect replay
+- `Session.Liveliness().DeclareToken(keyExpr, nil)` → `LivelinessToken` —
+  own-side presence marker, auto-replayed on reconnect
+- `Session.Liveliness().DeclareSubscriber(keyExpr, handler, opts)` — emits
+  `INTEREST[Mode=Future|CurrentFuture, K+T, restricted=keyExpr]`. Each
+  D_TOKEN arrives as a `Put` Sample, each U_TOKEN as a `Delete` Sample.
+  `opts.History=true` asks the router to also replay currently-alive
+  tokens at declare time. Auto-replayed on reconnect.
+- `Session.Liveliness().Get(keyExpr, opts)` (+ `GetWithContext`) — emits
+  `INTEREST[Mode=Current, K+T, restricted=keyExpr]`. Returns a reply
+  channel that yields one `Put` Sample per currently-alive matching
+  token, then closes when the router sends `DeclareFinal`.
+- Receive-side `D_KEYEXPR` alias resolution lands alongside the
+  Liveliness Subscriber path (zenohd uses scoped expressions when
+  forwarding D_TOKEN, so this is required for interop).
 
 ### Context / cancellation
 
@@ -196,20 +208,22 @@ Runnable variants live under [`examples/`](examples/):
 - Integration tests under [`tests/interop/`](tests/interop/) using
   `docker-compose` + `eclipse/zenoh:1.0.0` + Python `eclipse-zenoh==1.2.1` as
   the canonical counterpart — covers both directions (Go ↔ Py) for pub/sub,
-  get/queryable, and liveliness
+  get/queryable, liveliness tokens, and Python-token → Go-liveliness-subscriber
 
 ## Future work
 
 Not yet implemented, in rough priority order:
 
-- **Liveliness Subscriber** and **Liveliness Get** on the Go side — the
-  INTEREST send-path infrastructure landed with the Querier, so these are
-  straightforward follow-ons
 - **Matching Listener** on publishers — notifications when subscribers
   appear/disappear (reuses the INTEREST plumbing)
 - **Scout** — UDP multicast SCOUT / HELLO discovery (byte-level codec is
   already written; UDP transport and scout state machine are not)
-- **KeyExpr aliasing** — `D_KEYEXPR` send side for smaller on-wire messages
+- **`D_KEYEXPR` send side** — today we resolve inbound aliases but never
+  declare our own; a send-side implementation shrinks outbound messages
+  by letting the router reuse a scope id for a long key expression
+- **`CancellationToken` wiring on other operations** — currently only
+  `GetOptions.WithCancellation` accepts one; extend to liveliness Get /
+  Querier Get for symmetry with zenoh-rust
 - **`SourceInfo` extension** (behind unstable)
 - **Link / Transport info API** — inspect the current link (addr, stats)
 - **Full JSON5 Config parser** — today `Config` is a flat struct; JSON5 is

@@ -236,7 +236,9 @@ func runReplyTranslator(ctx context.Context, inboundCh <-chan session.InboundRep
 }
 
 func runStreamTranslator(ctx context.Context, inboundCh <-chan session.InboundReply, out chan<- Reply) {
-	streamReplies(ctx, inboundCh, out, func(r Reply) (Reply, bool) { return r, true })
+	streamRepliesGeneric(ctx, inboundCh, out, func(raw session.InboundReply) (Reply, bool) {
+		return buildPublicReply(raw), true
+	})
 }
 
 // runMonotonicTranslator emits a reply only when its timestamp is
@@ -247,7 +249,8 @@ func runStreamTranslator(ctx context.Context, inboundCh <-chan session.InboundRe
 // ConsolidationNone, which matches zenoh-rust.
 func runMonotonicTranslator(ctx context.Context, inboundCh <-chan session.InboundReply, out chan<- Reply) {
 	latest := make(map[string]uint64)
-	streamReplies(ctx, inboundCh, out, func(reply Reply) (Reply, bool) {
+	streamRepliesGeneric(ctx, inboundCh, out, func(raw session.InboundReply) (Reply, bool) {
+		reply := buildPublicReply(raw)
 		if reply.hasSample {
 			if t, hasTS := reply.sample.TimeStamp(); hasTS {
 				ts := t.Time()
@@ -262,13 +265,15 @@ func runMonotonicTranslator(ctx context.Context, inboundCh <-chan session.Inboun
 	})
 }
 
-// streamReplies reads inbound replies, runs each through decide to get
-// the public Reply and a keep flag, and forwards accepted ones to out.
-// Exits cleanly on inboundCh close or ctx cancel.
-func streamReplies(ctx context.Context, inboundCh <-chan session.InboundReply,
-	out chan<- Reply, decide func(Reply) (Reply, bool)) {
+// streamRepliesGeneric reads inbound events of any type, runs each
+// through decide to get the public Reply and a keep flag, and forwards
+// accepted ones to out. Exits cleanly on inboundCh close or ctx cancel.
+// Shared by the Get / Liveliness-Get translators — only the decide
+// closure differs.
+func streamRepliesGeneric[In any](ctx context.Context, inboundCh <-chan In,
+	out chan<- Reply, decide func(In) (Reply, bool)) {
 	for raw := range inboundCh {
-		reply, keep := decide(buildPublicReply(raw))
+		reply, keep := decide(raw)
 		if !keep {
 			continue
 		}
@@ -366,6 +371,14 @@ func mergeCancelContexts(a, b context.Context) (context.Context, func()) {
 // first, it calls CancelGet so the translator exits and the public reply
 // channel closes.
 func (s *Session) runGetCancel(ctx context.Context, timeout time.Duration, reqID uint32, translatorExited <-chan struct{}) {
+	runCancelWatcher(ctx, timeout, translatorExited, func() { s.inner.CancelGet(reqID) })
+}
+
+// runCancelWatcher is the shared "race ctx / timer / exited-naturally"
+// loop used by Get and Liveliness Get cancel paths. On the first of
+// ctx.Done / timeout / translator exit, it invokes onCancel (a no-op
+// when the translator finished first).
+func runCancelWatcher(ctx context.Context, timeout time.Duration, translatorExited <-chan struct{}, onCancel func()) {
 	var timer *time.Timer
 	var timerC <-chan time.Time
 	if timeout > 0 {
@@ -379,9 +392,9 @@ func (s *Session) runGetCancel(ctx context.Context, timeout time.Duration, reqID
 	}()
 	select {
 	case <-ctx.Done():
-		s.inner.CancelGet(reqID)
+		onCancel()
 	case <-timerC:
-		s.inner.CancelGet(reqID)
+		onCancel()
 	case <-translatorExited:
 		// Translator already exited; nothing to cancel.
 	}

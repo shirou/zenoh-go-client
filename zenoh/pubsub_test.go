@@ -394,6 +394,44 @@ func (m *mockRouter) injectRequest(t *testing.T, requestID uint32, keyExpr, para
 	})
 }
 
+// injectTokenDeclare simulates a router-side D_TOKEN. If interestID > 0
+// the DECLARE carries the interest_id so the client can route it to a
+// matching in-flight liveliness Get.
+func (m *mockRouter) injectTokenDeclare(t *testing.T, interestID, tokenID uint32, keyExpr string) {
+	t.Helper()
+	m.inject(t, &wire.Declare{
+		InterestID:    interestID,
+		HasInterestID: interestID != 0,
+		Body: &wire.DeclareEntity{
+			Kind:     wire.IDDeclareToken,
+			EntityID: tokenID,
+			KeyExpr:  wire.WireExpr{Scope: 0, Suffix: keyExpr},
+		},
+	})
+}
+
+// injectTokenUndeclare simulates a router-side U_TOKEN.
+func (m *mockRouter) injectTokenUndeclare(t *testing.T, tokenID uint32, keyExpr string) {
+	t.Helper()
+	m.inject(t, &wire.Declare{
+		Body: &wire.UndeclareEntity{
+			Kind:     wire.IDUndeclareToken,
+			EntityID: tokenID,
+			WireExpr: wire.WireExpr{Scope: 0, Suffix: keyExpr},
+		},
+	})
+}
+
+// injectDeclareFinal signals end-of-snapshot for a liveliness Get.
+func (m *mockRouter) injectDeclareFinal(t *testing.T, interestID uint32) {
+	t.Helper()
+	m.inject(t, &wire.Declare{
+		InterestID:    interestID,
+		HasInterestID: true,
+		Body:          &wire.DeclareFinal{},
+	})
+}
+
 // injectReply simulates a RESPONSE with a PUT body. Equivalent to
 // injectReplyWithTS(..., 0).
 func (m *mockRouter) injectReply(t *testing.T, requestID uint32, keyExpr, payload string) {
@@ -1201,6 +1239,134 @@ func TestDeclareQuerierEmitsInterest(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("INTEREST Final not observed within 2s")
+	}
+}
+
+// TestDeclareLivelinessSubscriberEmitsInterestAndDelivers: declare a
+// liveliness subscriber, verify the INTEREST mode/filter/key, then
+// inject D_TOKEN / U_TOKEN and assert the handler sees Put / Delete
+// samples.
+func TestDeclareLivelinessSubscriberEmitsInterestAndDelivers(t *testing.T) {
+	router := newMockRouter(t)
+	defer router.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	sess, err := Open(ctx, NewConfig().WithEndpoint("tcp/"+router.Addr()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+
+	ke, _ := NewKeyExpr("group1/**")
+	ch := make(chan Sample, 4)
+	sub, err := sess.Liveliness().DeclareSubscriber(ke, Closure[Sample]{
+		Call: func(s Sample) { ch <- s },
+	}, &LivelinessSubscriberOptions{History: true})
+	if err != nil {
+		t.Fatalf("DeclareSubscriber: %v", err)
+	}
+	defer sub.Drop()
+
+	var interestID uint32
+	select {
+	case obs := <-router.interests:
+		if obs.final {
+			t.Errorf("unexpected INTEREST Final")
+		}
+		if obs.mode != wire.InterestModeCurrentFuture {
+			t.Errorf("mode=%v, want CurrentFuture (History=true)", obs.mode)
+		}
+		if !obs.filter.KeyExprs || !obs.filter.Tokens {
+			t.Errorf("filter=%+v, want K=1,T=1", obs.filter)
+		}
+		if obs.key != "group1/**" {
+			t.Errorf("key=%q, want group1/**", obs.key)
+		}
+		interestID = obs.id
+	case <-time.After(2 * time.Second):
+		t.Fatal("INTEREST not observed within 2s")
+	}
+
+	// Inject a D_TOKEN then a U_TOKEN and verify dispatch.
+	router.injectTokenDeclare(t, 0, 42, "group1/alpha")
+	router.injectTokenUndeclare(t, 42, "group1/alpha")
+
+	for i, want := range []SampleKind{SampleKindPut, SampleKindDelete} {
+		select {
+		case s := <-ch:
+			if s.Kind() != want {
+				t.Errorf("sample[%d] kind = %v, want %v", i, s.Kind(), want)
+			}
+			if s.KeyExpr().String() != "group1/alpha" {
+				t.Errorf("sample[%d] key = %q, want group1/alpha", i, s.KeyExpr())
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("sample[%d] not delivered within 2s", i)
+		}
+	}
+
+	// Drop → INTEREST Final with matching id.
+	sub.Drop()
+	select {
+	case obs := <-router.interests:
+		if !obs.final {
+			t.Errorf("expected INTEREST Final, got %+v", obs)
+		}
+		if obs.id != interestID {
+			t.Errorf("Final id=%d, want %d", obs.id, interestID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("INTEREST Final not observed within 2s")
+	}
+}
+
+// TestLivelinessGetYieldsRepliesUntilFinal: the router sends two tokens
+// then a DeclareFinal; the replies channel emits two Samples and closes.
+func TestLivelinessGetYieldsRepliesUntilFinal(t *testing.T) {
+	router := newMockRouter(t)
+	defer router.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	sess, err := Open(ctx, NewConfig().WithEndpoint("tcp/"+router.Addr()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+
+	ke, _ := NewKeyExpr("live/**")
+	replies, err := sess.Liveliness().Get(ke, nil)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	var id uint32
+	select {
+	case obs := <-router.interests:
+		if obs.mode != wire.InterestModeCurrent {
+			t.Errorf("mode=%v, want Current", obs.mode)
+		}
+		id = obs.id
+	case <-time.After(2 * time.Second):
+		t.Fatal("INTEREST not observed within 2s")
+	}
+
+	router.injectTokenDeclare(t, id, 1, "live/a")
+	router.injectTokenDeclare(t, id, 2, "live/b")
+	router.injectDeclareFinal(t, id)
+
+	got := 0
+	for r := range replies {
+		got++
+		if s, ok := r.Sample(); ok {
+			if s.Kind() != SampleKindPut {
+				t.Errorf("reply kind=%v, want Put", s.Kind())
+			}
+		}
+	}
+	if got != 2 {
+		t.Errorf("got %d replies, want 2", got)
 	}
 }
 

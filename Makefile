@@ -1,4 +1,10 @@
-.PHONY: all build test vet fmt lint clean interop
+.PHONY: all build test vet fmt lint clean interop interop-stress
+
+# Build tag conventions for tests/interop/:
+#   interop           — default interop suite, runs against default compose
+#   interop_multicast — Scout / multicast-enabled scenarios
+#   stress            — scale / large payload / high-rate; opt-in, nightly CI
+#   fault             — toxiproxy / tc netem fault injection; opt-in
 
 all: build test
 
@@ -41,3 +47,8 @@ interop-multicast-down:
 
 interop-multicast-test: interop-multicast-up
 	go test -race -tags interop_multicast -count=1 -v ./tests/interop/...
+
+# Stress suite: large payloads, 100+ entities, high-rate publish. Runs on
+# the default compose; ~minutes scale, not for every-commit CI.
+interop-stress: interop-up
+	go test -race -tags "interop stress" -count=1 -timeout 30m -v ./tests/interop/... ./tests/stress/...

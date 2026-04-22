@@ -21,8 +21,8 @@ type Queryable struct {
 	dropped atomic.Bool
 }
 
-// QueryableOptions controls queryable declaration. For Phase 5 MVP only
-// Complete is implemented (via the QueryableInfo extension).
+// QueryableOptions controls queryable declaration. Only Complete is
+// implemented currently (via the QueryableInfo extension).
 type QueryableOptions struct {
 	Complete bool
 }

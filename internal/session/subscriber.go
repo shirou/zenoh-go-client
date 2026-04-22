@@ -83,8 +83,8 @@ func (s *Session) ForEachSubscriber(fn func(id uint32, ke keyexpr.KeyExpr)) {
 }
 
 // dispatchPush routes an inbound PUSH to every subscriber whose key
-// expression intersects the push's key. For MVP we walk the registry
-// linearly; a trie is Phase 6+.
+// expression intersects the push's key. The registry is walked linearly;
+// a trie can replace it once the subscriber count justifies the cost.
 func (s *Session) dispatchPush(pushKE keyexpr.KeyExpr, sample PushSample) {
 	reg := s.regSubscribers()
 	reg.mu.RLock()

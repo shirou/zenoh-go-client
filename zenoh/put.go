@@ -75,6 +75,13 @@ func (s *Session) DeleteWithContext(ctx context.Context, keyExpr KeyExpr, opts *
 func (s *Session) enqueuePush(ctx context.Context, keyExpr KeyExpr, body wire.PushBody, opts *PutOptions) error {
 	push := &wire.Push{KeyExpr: keyExpr.toWire(), Body: body}
 	prio, reliable, express := pushQoS(opts)
+	// Receiver-visible Sample.priority / congestion_control / express is
+	// read from the Push-level QoS ext, not the Frame-level one. Omitted
+	// on default values to match zenoh-rust's wire.
+	if prio != wire.QoSPriorityDefault || reliable || express {
+		q := wire.QoS{Priority: prio, DontDrop: reliable, Express: express}
+		push.Extensions = []codec.Extension{codec.NewZ64Ext(wire.ExtIDQoS, false, q.EncodeZ64())}
+	}
 	return s.enqueueNetwork(ctx, push, prio, reliable, express)
 }
 

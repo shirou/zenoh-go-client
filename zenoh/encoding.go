@@ -209,6 +209,16 @@ var encodingPrefixToID = func() map[string]uint32 {
 	return m
 }()
 
+// AllPredefinedEncodings returns the full catalogue of predefined encodings,
+// ordered by ID. Callers must not mutate the returned slice.
+func AllPredefinedEncodings() []Encoding {
+	out := make([]Encoding, len(encodingIDToPrefix))
+	for id := range encodingIDToPrefix {
+		out[id] = Encoding{id: id}
+	}
+	return out
+}
+
 // fmtUnknownEncoding formats an unknown encoding id for display. Mirrors
 // zenoh-rust's "<N>" convention. Called only when an id is not in the
 // 53-entry catalogue, so it is not on the data-plane hot path.

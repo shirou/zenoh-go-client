@@ -61,8 +61,8 @@ func (k KeyExpr) Concat(suffix string) (KeyExpr, error) {
 }
 
 // toWire returns the WireExpr for full-string encoding (scope=0 + suffix).
-// Aliasing / alias-table support is a Phase 6 concern; for now every
-// emission sends the full key-expression string.
+// Every emission sends the full key-expression string; aliasing and
+// alias-table support can be added later.
 func (k KeyExpr) toWire() wire.WireExpr {
 	return wire.WireExpr{Scope: 0, Suffix: k.inner.String()}
 }

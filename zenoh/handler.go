@@ -61,7 +61,7 @@ func (c Closure[T]) Attach() (func(T), func(), any) {
 
 // FifoChannel is a bounded channel-backed handler. Callers read from the
 // channel returned by Attach's handle. When the channel is full, further
-// samples are dropped (MVP behaviour; Phase 6 will add block-on-full).
+// samples are dropped; a block-on-full variant can be added later.
 type FifoChannel[T any] struct {
 	Capacity int
 }

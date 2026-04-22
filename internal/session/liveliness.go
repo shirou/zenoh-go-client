@@ -89,7 +89,7 @@ func (s *Session) dispatchLiveliness(tokenKE keyexpr.KeyExpr, ev LivelinessEvent
 // case a later D_TOKEN overwrites the earlier entry, and the
 // corresponding U_TOKENs resolve to whichever key was most recently
 // written. The live-interop tests exercise the single-token path that
-// this handles correctly; multi-token-per-id fidelity is a Phase 7 item.
+// this handles correctly; multi-token-per-id fidelity is a follow-up.
 type inboundTokens struct {
 	mu   sync.RWMutex
 	byID map[uint32]string

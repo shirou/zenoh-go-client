@@ -28,6 +28,11 @@ const (
 	hostEndpoint = "tcp/127.0.0.1:7447"
 	readyTimeout = 10 * time.Second
 	ioTimeout    = 15 * time.Second
+	// subPropagationDelay gives the router time to propagate a freshly
+	// declared Subscriber/Queryable/Token back to this client before the
+	// test starts emitting samples. Empirically 200ms is comfortable over
+	// localhost docker; shorter values cause intermittent early-send drops.
+	subPropagationDelay = 200 * time.Millisecond
 	// Line-protocol sentinels — keep in sync with python_common.py.
 	readyMarker = "READY"
 	doneMarker  = "DONE"
@@ -164,13 +169,17 @@ func (p *pyProc) readLine(t *testing.T, timeout time.Duration) string {
 	return ""
 }
 
-// signalGo writes "GO\n" to stdin — matches python_pub.py's gate.
-func (p *pyProc) signalGo(t *testing.T) {
+// sendLine writes line + "\n" to the child's stdin. Fails the test on
+// write error (the child script is presumably gone).
+func (p *pyProc) sendLine(t *testing.T, line string) {
 	t.Helper()
-	if _, err := io.WriteString(p.stdin, goMarker+"\n"); err != nil {
-		t.Fatalf("write %s: %v", goMarker, err)
+	if _, err := io.WriteString(p.stdin, line+"\n"); err != nil {
+		t.Fatalf("write %q: %v", line, err)
 	}
 }
+
+// signalGo wakes a Python script parked at `sys.stdin.readline() == "GO"`.
+func (p *pyProc) signalGo(t *testing.T) { p.sendLine(t, goMarker) }
 
 // close closes stdin (triggering the script's EOF-exit path) and waits for
 // the process. Errors are logged, not failed, so a lingering python exit
@@ -209,10 +218,44 @@ func openGoSession(t *testing.T) *zenoh.Session {
 
 // pyRecord matches the JSON schema emitted by python_common.sample_to_json /
 // reply_to_json. Fields not produced by a given helper are left as the zero value.
+//
+// Kind is json.RawMessage because sample_to_json emits an int (0/1, matching
+// wire SampleKind) while reply_to_json emits a string ("ok"/"err"). Callers
+// use ReplyKind() or SampleKind() to pick the right decoding.
 type pyRecord struct {
-	Kind    string `json:"kind"`
-	Key     string `json:"key"`
-	Payload string `json:"payload"` // base64
+	Kind       json.RawMessage `json:"kind"`
+	Key        string          `json:"key"`
+	Payload    string          `json:"payload"` // base64
+	Encoding   string          `json:"encoding,omitempty"`
+	Priority   *int            `json:"priority,omitempty"`
+	Congestion *int            `json:"congestion,omitempty"`
+	Express    *bool           `json:"express,omitempty"`
+	Timestamp  *pyTimestamp    `json:"timestamp,omitempty"`
+}
+
+// pyTimestamp mirrors the timestamp dict emitted by python_common.
+type pyTimestamp struct {
+	NTP64 uint64 `json:"ntp64"`
+	ZID   string `json:"zid"`
+}
+
+// ReplyKind returns the reply-kind string ("ok"/"err") or "" if not a string.
+func (r pyRecord) ReplyKind() string {
+	var s string
+	if err := json.Unmarshal(r.Kind, &s); err != nil {
+		return ""
+	}
+	return s
+}
+
+// SampleKind returns the sample kind, or -1 if the Kind field is not an int
+// (e.g. record came from reply_to_json).
+func (r pyRecord) SampleKind() zenoh.SampleKind {
+	var n int
+	if err := json.Unmarshal(r.Kind, &n); err != nil {
+		return zenoh.SampleKind(^uint8(0))
+	}
+	return zenoh.SampleKind(n)
 }
 
 // decodeRecord parses one JSON line into pyRecord and b64-decodes its payload.
@@ -256,7 +299,7 @@ func TestGoPubPySub(t *testing.T) {
 	defer pub.Drop()
 
 	// Give the router a breath to propagate the D_SUBSCRIBER before PUSH.
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(subPropagationDelay)
 
 	for i := 0; i < count; i++ {
 		if err := pub.Put(zenoh.NewZBytesFromString(fmt.Sprintf("hello-%d", i)), nil); err != nil {
@@ -307,7 +350,7 @@ func TestPyPubGoSub(t *testing.T) {
 	defer pub.close(t)
 	pub.waitFor(t, readyMarker, readyTimeout)
 	// Router needs a moment to propagate the D_SUBSCRIBER.
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(subPropagationDelay)
 	pub.signalGo(t)
 
 	deadline := time.After(ioTimeout)
@@ -341,7 +384,7 @@ func TestGoGetPyQueryable(t *testing.T) {
 	defer session.Close()
 
 	// Let the router propagate D_QUERYABLE.
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(subPropagationDelay)
 
 	ke, err := zenoh.NewKeyExpr(key)
 	if err != nil {
@@ -398,7 +441,7 @@ func TestGoLivelinessPyGet(t *testing.T) {
 	defer tok.Drop()
 
 	// Router needs a moment to propagate D_TOKEN before the Python get lands.
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(subPropagationDelay)
 
 	get := startPython(t, "python_liveliness_get.py", "--key", getKey)
 	defer get.close(t)
@@ -450,7 +493,7 @@ func TestPyLivelinessTokenGoSubscriber(t *testing.T) {
 	defer sub.Drop()
 
 	// Router must receive & propagate the INTEREST before Python declares.
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(subPropagationDelay)
 
 	tok := startPython(t, "python_liveliness_token.py", "--key", key)
 	defer tok.close(t)
@@ -470,9 +513,7 @@ func TestPyLivelinessTokenGoSubscriber(t *testing.T) {
 	}
 
 	// Tell Python to drop the token → expect Delete event.
-	if _, err := io.WriteString(tok.stdin, "DROP\n"); err != nil {
-		t.Fatalf("signal drop: %v", err)
-	}
+	tok.sendLine(t, "DROP")
 	tok.waitFor(t, doneMarker, ioTimeout)
 
 	select {
@@ -512,7 +553,7 @@ func TestPyGetGoQueryable(t *testing.T) {
 	defer qbl.Drop()
 
 	// Let the router propagate D_QUERYABLE.
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(subPropagationDelay)
 
 	get := startPython(t, "python_get.py", "--key", key)
 	defer get.close(t)
@@ -524,8 +565,8 @@ func TestPyGetGoQueryable(t *testing.T) {
 		t.Fatal("DONE with no reply from Go queryable")
 	}
 	rec, payload := decodeRecord(t, line)
-	if rec.Kind != "ok" {
-		t.Errorf("reply kind = %q, want ok", rec.Kind)
+	if rec.ReplyKind() != "ok" {
+		t.Errorf("reply kind = %q, want ok", rec.ReplyKind())
 	}
 	if string(payload) != reply {
 		t.Errorf("payload = %q, want %q", payload, reply)

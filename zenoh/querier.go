@@ -49,8 +49,8 @@ type Querier struct {
 
 // DeclareQuerier registers a querier bound to keyExpr. Sends the
 // subscribe-style INTEREST immediately so the router can stream matching
-// queryable state to us (today the client does not expose the stream;
-// reporting it via MatchingListener-style callback is a Phase 6 follow-up).
+// queryable state to us. The stream is not exposed to callers yet;
+// surfacing it via a MatchingListener-style callback is a follow-up.
 func (s *Session) DeclareQuerier(keyExpr KeyExpr, opts *QuerierOptions) (*Querier, error) {
 	if s.closed.Load() {
 		return nil, ErrSessionClosed

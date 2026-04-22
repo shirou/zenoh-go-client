@@ -1,3 +1,7 @@
+# Default interop compose. Router-chain / fault-injection / restart
+# variants ship in sibling files (docker-compose.chain.yml,
+# docker-compose.fault.yml, docker-compose.restart.yml) when they become
+# needed.
 services:
   zenohd:
     image: eclipse/zenoh:1.0.0

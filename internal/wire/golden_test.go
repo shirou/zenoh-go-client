@@ -13,8 +13,8 @@ import (
 // that a pure encode→decode self-roundtrip would miss.
 //
 // Fixture is hand-built from docs/modules/session/pages/open-accept.adoc §INIT.
-// Once Phase 2 can capture a real INIT SYN from zenoh-rust via tcpdump, this
-// fixture will be replaced with the real capture for true interop assurance.
+// Replace with a real INIT SYN captured from zenoh-rust via tcpdump when
+// that capture becomes available, for true interop assurance.
 func TestGoldenInitSynSpec(t *testing.T) {
 	// INIT SYN with:
 	//   A=0 (Syn), S=1 (resolution+batch), Z=1 (one QoS Unit extension)

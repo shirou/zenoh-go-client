@@ -3,6 +3,7 @@ package zenoh
 import (
 	"context"
 	"crypto/rand"
+	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -1146,6 +1147,52 @@ func TestGetConsolidationNone(t *testing.T) {
 	got := collectPayloads(t, replies, 2*time.Second)
 	if got := len(got); got != 3 {
 		t.Fatalf("got %d replies, want 3", got)
+	}
+}
+
+// TestGetBudgetCapsDeliveredReplies verifies that when the router keeps
+// sending replies past the advertised Budget cap (zenohd 1.0.0 does, for
+// local queryables), the client still closes the reply channel after
+// exactly Budget items. Feeds 5 replies with Budget=2 and asserts 2
+// delivered + channel closed.
+func TestGetBudgetCapsDeliveredReplies(t *testing.T) {
+	router := newMockRouter(t)
+	defer router.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	sess, err := Open(ctx, NewConfig().WithEndpoint("tcp/"+router.Addr()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+
+	ke, _ := NewKeyExpr("demo/budget/**")
+	replies, err := sess.Get(ke, &GetOptions{
+		Consolidation:    ConsolidationNone,
+		HasConsolidation: true,
+		Budget:           2,
+	})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	var req inboundRequest
+	select {
+	case req = <-router.requests:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no REQUEST observed")
+	}
+
+	for i := range 5 {
+		router.injectReply(t, req.requestID, "k", fmt.Sprintf("r%d", i))
+	}
+
+	got := collectPayloads(t, replies, 2*time.Second)
+	if len(got) != 2 {
+		t.Fatalf("got %d replies (%v), want 2", len(got), got)
+	}
+	if got[0] != "r0" || got[1] != "r1" {
+		t.Errorf("delivered = %v, want [r0 r1]", got)
 	}
 }
 

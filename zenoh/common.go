@@ -74,7 +74,7 @@ func (c CongestionControl) String() string {
 
 // WhatAmI is the node role. Wire values: 0b00=Router, 0b01=Peer, 0b10=Client.
 // Only Client is fully supported in the initial implementation, but all three
-// values are defined so types are ready for later phases.
+// values are defined so types are ready for future work.
 type WhatAmI uint8
 
 const (

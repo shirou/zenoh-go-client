@@ -128,7 +128,7 @@ func processBatch(cfg ReaderConfig, batch []byte) error {
 				return fmt.Errorf("FRAGMENT: %w", err)
 			}
 			lane := transport.LaneKey{
-				Priority: laneKeyPriority(frag.Extensions),
+				Priority: transport.LanePriorityFromExts(frag.Extensions),
 				Reliable: frag.Reliable,
 			}
 			// Reassembler owns the body copy on completion.
@@ -178,13 +178,4 @@ func dispatchFrameBody(cfg ReaderConfig, body []byte) error {
 		}
 	}
 	return nil
-}
-
-// laneKeyPriority extracts the QoS priority from a FRAME/FRAGMENT extension
-// chain. Falls back to the default Data priority if no QoS ext is present.
-func laneKeyPriority(exts []codec.Extension) uint8 {
-	if e := codec.FindExt(exts, wire.ExtIDQoS); e != nil && e.Header.Encoding == codec.ExtEncZ64 {
-		return uint8(wire.DecodeQoSZ64(e.Z64).Priority)
-	}
-	return uint8(wire.QoSPriorityData)
 }

@@ -108,21 +108,22 @@ func TestBatcherLanesIndependent(t *testing.T) {
 	}
 }
 
-// TestBatcherOverflowSplits: a message that doesn't fit triggers a flush
-// and then starts a new batch.
+// TestBatcherOverflowSplits: a message that doesn't fit in the open FRAME
+// triggers a flush and starts a new batch.
+//
+// Sizes are tuned so each 40-byte message fits alone (≤ batchSize-fragmentOverhead
+// so it doesn't trigger fragmentation) but two together overflow.
 func TestBatcherOverflowSplits(t *testing.T) {
-	b, out := newCapturingBatcher(t, 32, true)
+	b, out := newCapturingBatcher(t, 64, true)
 
-	big := make([]byte, 20)
+	body := make([]byte, 40)
 	for range 3 {
-		if err := b.Enqueue(&OutboundMessage{Encoded: big, Priority: wire.QoSPriorityData, Reliable: true}); err != nil {
+		if err := b.Enqueue(&OutboundMessage{Encoded: body, Priority: wire.QoSPriorityData, Reliable: true}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	_ = b.FlushAll()
 
-	// Three 20-byte messages with ~5-byte FRAME header/ext; each message
-	// needs its own batch → 3 flushes.
 	if len(*out) != 3 {
 		t.Errorf("expected 3 flushes, got %d", len(*out))
 	}

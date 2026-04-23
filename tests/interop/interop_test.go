@@ -258,6 +258,33 @@ func (r pyRecord) SampleKind() zenoh.SampleKind {
 	return zenoh.SampleKind(n)
 }
 
+// collectGetPayloads drains a Get reply channel until it closes (after
+// RESPONSE_FINAL), returning the payload of each successful data reply in
+// arrival order. An error reply fails the test but draining continues;
+// exceeding timeout without the channel closing also fails the test.
+func collectGetPayloads(t *testing.T, ch <-chan zenoh.Reply, timeout time.Duration) []string {
+	t.Helper()
+	deadline := time.After(timeout)
+	var out []string
+	for {
+		select {
+		case r, ok := <-ch:
+			if !ok {
+				return out
+			}
+			s, hasSample := r.Sample()
+			if !hasSample {
+				t.Errorf("got err reply, want sample")
+				continue
+			}
+			out = append(out, string(s.Payload().Bytes()))
+		case <-deadline:
+			t.Fatal("timeout waiting for replies or RESPONSE_FINAL")
+			return out
+		}
+	}
+}
+
 // decodeRecord parses one JSON line into pyRecord and b64-decodes its payload.
 func decodeRecord(t *testing.T, line string) (pyRecord, []byte) {
 	t.Helper()
@@ -394,25 +421,7 @@ func TestGoGetPyQueryable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	deadline := time.After(ioTimeout)
-	var payloads []string
-	for open := true; open; {
-		select {
-		case r, ok := <-replies:
-			if !ok {
-				open = false
-				continue
-			}
-			s, hasSample := r.Sample()
-			if !hasSample {
-				t.Errorf("expected ok reply, got err")
-				continue
-			}
-			payloads = append(payloads, string(s.Payload().Bytes()))
-		case <-deadline:
-			t.Fatal("timeout waiting for reply or final")
-		}
-	}
+	payloads := collectGetPayloads(t, replies, ioTimeout)
 	if len(payloads) != 1 || payloads[0] != "pong-from-python" {
 		t.Errorf("replies = %v, want [\"pong-from-python\"]", payloads)
 	}

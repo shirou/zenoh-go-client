@@ -14,8 +14,7 @@ import (
 //
 // Optional fields use a "Has" boolean because Go zero-value semantics
 // would otherwise conflate "unset" with "value 0" (e.g. the zero Priority
-// is PriorityControl, which is a legitimate value — not "default"). Phase
-// 6+ migrates these to option.Option[T] per the design doc.
+// is PriorityControl, which is a legitimate value — not "default").
 type PutOptions struct {
 	Encoding          Encoding
 	HasEncoding       bool

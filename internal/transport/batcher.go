@@ -63,6 +63,10 @@ type lane struct {
 //
 // Express messages flush the existing lane batch, then send the message
 // alone in a fresh FRAME and flush again.
+//
+// Messages too large to fit in a single batch are split into FRAGMENT
+// transport messages on the same lane (sharing its seq_num space). Any
+// FRAME currently building on the lane is flushed first to preserve order.
 func (b *Batcher) Enqueue(msg *OutboundMessage) error {
 	if !msg.Priority.IsValid() {
 		return fmt.Errorf("batcher: invalid priority %d", msg.Priority)
@@ -71,6 +75,13 @@ func (b *Batcher) Enqueue(msg *OutboundMessage) error {
 	defer b.mu.Unlock()
 
 	l := b.laneFor(msg.Priority, msg.Reliable)
+
+	if len(msg.Encoded) > b.maxFrameBodySize() {
+		if err := b.flushLocked(l); err != nil {
+			return err
+		}
+		return b.fragmentLocked(l, msg.Encoded)
+	}
 
 	if msg.Express {
 		// Flush anything queued on this lane, then emit the express message
@@ -91,6 +102,46 @@ func (b *Batcher) Enqueue(msg *OutboundMessage) error {
 		}
 	}
 	return b.appendToLane(l, msg.Encoded)
+}
+
+// maxFrameBodySize is the largest single NetworkMessage we still try to
+// pack into a FRAME. Anything strictly larger is fragmented instead.
+// Subtracts the FRAME header + seq_num + optional QoS-ext overhead so a
+// message at or below this size is guaranteed to fit in a fresh FRAME on
+// its own; multi-message FRAMEs still go through the normal flush-on-
+// overflow path inside Enqueue.
+func (b *Batcher) maxFrameBodySize() int { return b.batchSize - fragmentOverhead }
+
+// fragmentLocked splits msgBytes into FRAGMENT transport messages on the
+// lane and writes each as its own stream batch via b.sink. The lane's
+// seq_num is advanced by the number of fragments emitted so subsequent
+// FRAMEs on the lane keep monotonic seq_nums. Must be called with b.mu held.
+//
+// Fragmenter.MaxBodySize takes the full batchSize because the fragmenter
+// internally subtracts its own per-fragment overhead — passing
+// maxFrameBodySize() here would deduct it twice.
+func (b *Batcher) fragmentLocked(l *lane, msgBytes []byte) error {
+	var exts []codec.Extension
+	if b.attachQoS {
+		exts = []codec.Extension{
+			codec.NewZ64Ext(wire.ExtIDQoS, true, wire.QoS{Priority: l.priority}.EncodeZ64()),
+		}
+	}
+	// Single buffer reused across every fragment of this Enqueue. The sink
+	// consumes the bytes synchronously so we can reset between iterations.
+	scratch := make([]byte, 0, b.batchSize)
+	f := Fragmenter{MaxBodySize: b.batchSize}
+	nextSN, err := f.Fragment(msgBytes, l.reliable, l.seqNum, exts, func(frag *wire.Fragment) error {
+		w := codec.WriterFromSlice(scratch)
+		if err := frag.EncodeTo(w); err != nil {
+			return err
+		}
+		batch := w.Bytes()
+		scratch = batch[:0]
+		return b.sink(batch)
+	})
+	l.seqNum = nextSN
+	return err
 }
 
 // FlushAll flushes every non-empty lane to the sink.

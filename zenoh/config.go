@@ -4,7 +4,7 @@ import "time"
 
 // Config is the minimal session configuration. This MVP covers
 // `connect/endpoints`, `id`, and reconnect timing; the full
-// Rust-compatible schema comes in a later phase.
+// Rust-compatible schema comes in a future work.
 type Config struct {
 	// Endpoints is the ordered list of locator strings (e.g.
 	// "tcp/127.0.0.1:7447") to try when opening the session.

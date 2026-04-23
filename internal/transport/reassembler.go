@@ -3,12 +3,26 @@ package transport
 import (
 	"bytes"
 	"fmt"
+
+	"github.com/shirou/zenoh-go-client/internal/codec"
+	"github.com/shirou/zenoh-go-client/internal/wire"
 )
 
 // LaneKey identifies one of the 16 QoS lanes (8 priorities × reliable/best_effort).
 type LaneKey struct {
 	Priority uint8
 	Reliable bool
+}
+
+// LanePriorityFromExts extracts the QoS priority encoded on a FRAME or
+// FRAGMENT extension chain. Falls back to the spec-default Data priority
+// when no QoS Z64 extension is present — used by both the inbound reader
+// and reassembler-test fixtures so the lane keying stays in lockstep.
+func LanePriorityFromExts(exts []codec.Extension) uint8 {
+	if e := codec.FindExt(exts, wire.ExtIDQoS); e != nil && e.Header.Encoding == codec.ExtEncZ64 {
+		return uint8(wire.DecodeQoSZ64(e.Z64).Priority)
+	}
+	return uint8(wire.QoSPriorityData)
 }
 
 // Reassembler accumulates FRAGMENT bodies per lane into a complete message.

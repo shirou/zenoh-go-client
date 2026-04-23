@@ -76,10 +76,13 @@ type GetOptions struct {
 	Target    QueryTarget
 	HasTarget bool
 
-	// Budget caps the number of replies the querier will accept; routers
-	// SHOULD stop forwarding further RESPONSE messages after the cap is
-	// reached. Zero = unlimited (extension omitted). Spec calls for a
-	// non-zero u32.
+	// Budget caps the number of replies the querier will accept. The
+	// value is advertised on the wire so cooperating routers SHOULD stop
+	// forwarding further RESPONSE messages after the cap is reached; the
+	// client additionally enforces the cap locally, so the reply channel
+	// always closes after at most Budget items regardless of whether the
+	// router honoured the hint. Zero = unlimited (extension omitted).
+	// Spec calls for a non-zero u32.
 	Budget uint32
 
 	// Timeout bounds how long the querier waits for replies. Zero = no
@@ -160,6 +163,9 @@ func (s *Session) GetWithContext(ctx context.Context, keyExpr KeyExpr, opts *Get
 		bufSize = opts.Buffer
 	}
 	inboundCh := s.inner.RegisterGet(reqID, bufSize)
+	if opts != nil && opts.Budget > 0 {
+		inboundCh = budgetLimit(ctx, inboundCh, opts.Budget, bufSize)
+	}
 
 	// Build and send REQUEST.
 	body := &wire.QueryBody{}
@@ -215,6 +221,39 @@ func (s *Session) GetWithContext(ctx context.Context, keyExpr KeyExpr, opts *Get
 		runReplyTranslator(ctx, inboundCh, out, translatorExited, mode)
 	}()
 	return out, nil
+}
+
+// budgetLimit forwards at most n replies from src to a new channel and
+// exits once the cap is reached. src is left open; it will close via the
+// usual RESPONSE_FINAL / CancelGet / session-close paths, at which point
+// any late replies are dropped by the non-blocking send in deliverReply.
+// ctx is watched on both receive and send so the goroutine cannot leak
+// if the downstream translator stops reading. This keeps the Budget
+// contract honest even when the router does not honour the advisory
+// SHOULD.
+func budgetLimit(ctx context.Context, src <-chan session.InboundReply, n uint32, bufSize int) <-chan session.InboundReply {
+	dst := make(chan session.InboundReply, bufSize)
+	go func() {
+		defer close(dst)
+		var count uint32
+		for count < n {
+			select {
+			case r, ok := <-src:
+				if !ok {
+					return
+				}
+				select {
+				case dst <- r:
+					count++
+				case <-ctx.Done():
+					return
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return dst
 }
 
 // runReplyTranslator reads raw internal replies from inboundCh, applies

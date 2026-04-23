@@ -6,8 +6,7 @@ import (
 	"sync"
 )
 
-// Handler is the callback contract for subscriber (and, in later phases,
-// queryable/get) receivers.
+// Handler is the callback contract for subscriber (and queryable/get) receivers.
 //
 // Attach returns a deliver function that the session's inbound dispatcher
 // calls for every sample, a drop function invoked when the receiver is

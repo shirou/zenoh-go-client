@@ -6,8 +6,7 @@
 //
 // # Scope
 //
-// Initial implementation supports Client mode over TCP unicast. See
-// docs/implementation-plan.md for the phased feature list.
+// Initial implementation supports Client mode over TCP unicast.
 //
 // # Thread safety
 //

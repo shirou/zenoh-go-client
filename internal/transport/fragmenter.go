@@ -31,10 +31,12 @@ const fragmentOverhead = 16
 
 // Fragment splits msgBytes into a sequence of wire.Fragment messages and
 // passes each to sink in order. seqNumStart is the initial seq_num for the
-// first fragment; each subsequent fragment increments by 1.
+// first fragment; each subsequent fragment increments by 1. exts is
+// attached to every emitted fragment (typically the per-lane QoS Z64
+// extension so the receiver can route to the right reassembly lane).
 //
 // Returns the next-available seq_num (i.e. seqNumStart + number of fragments).
-func (f *Fragmenter) Fragment(msgBytes []byte, reliable bool, seqNumStart uint64, sink FragmentSink) (uint64, error) {
+func (f *Fragmenter) Fragment(msgBytes []byte, reliable bool, seqNumStart uint64, exts []codec.Extension, sink FragmentSink) (uint64, error) {
 	if f.MaxBodySize <= fragmentOverhead {
 		return seqNumStart, fmt.Errorf("fragmenter: MaxBodySize %d too small (need > %d)", f.MaxBodySize, fragmentOverhead)
 	}
@@ -44,10 +46,11 @@ func (f *Fragmenter) Fragment(msgBytes []byte, reliable bool, seqNumStart uint64
 		n := min(chunk, len(msgBytes))
 		more := n < len(msgBytes)
 		frag := &wire.Fragment{
-			Reliable: reliable,
-			More:     more,
-			SeqNum:   sn,
-			Body:     msgBytes[:n],
+			Reliable:   reliable,
+			More:       more,
+			SeqNum:     sn,
+			Extensions: exts,
+			Body:       msgBytes[:n],
 		}
 		if err := sink(frag); err != nil {
 			return sn, err

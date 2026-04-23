@@ -62,11 +62,18 @@ func (s *Session) RegisterGet(requestID uint32, bufferSize int) <-chan InboundRe
 
 // deliverReply pushes one reply onto the collector's channel. Silently drops
 // if the channel is full or the Get has been finalised.
+//
+// The read lock is held across the send so finaliseGet (which holds the
+// write lock to close the channel) can never run concurrently with this
+// send. Without that, the non-blocking send would race with close(replies)
+// and could panic with "send on closed channel" — racy on every cancel /
+// timeout path. The send itself is non-blocking (select default), so the
+// read lock is held only briefly.
 func (s *Session) deliverReply(requestID uint32, reply InboundReply) {
 	reg := s.regGets()
 	reg.mu.RLock()
+	defer reg.mu.RUnlock()
 	c, ok := reg.byReq[requestID]
-	reg.mu.RUnlock()
 	if !ok {
 		return
 	}
@@ -80,17 +87,22 @@ func (s *Session) deliverReply(requestID uint32, reply InboundReply) {
 
 // finaliseGet closes the collector's channel and removes it from the map.
 // Called on RESPONSE_FINAL and on CancelGet.
+//
+// close(replies) runs while the write lock is held, mutually exclusive
+// with any in-flight deliverReply (which holds the read lock across its
+// send). closeOnce additionally guards against double-close from racing
+// finaliseGet callers (e.g. RESPONSE_FINAL + concurrent CancelGet) that
+// both delete from the map but only one wins the entry lookup.
 func (s *Session) finaliseGet(requestID uint32) {
 	reg := s.regGets()
 	reg.mu.Lock()
+	defer reg.mu.Unlock()
 	c, ok := reg.byReq[requestID]
-	if ok {
-		delete(reg.byReq, requestID)
+	if !ok {
+		return
 	}
-	reg.mu.Unlock()
-	if c != nil {
-		c.closeOnce.Do(func() { close(c.replies) })
-	}
+	delete(reg.byReq, requestID)
+	c.closeOnce.Do(func() { close(c.replies) })
 }
 
 // CancelGet finalises a Get from the public-API side (e.g. context cancel).
@@ -102,12 +114,9 @@ func (s *Session) CancelGet(requestID uint32) { s.finaliseGet(requestID) }
 func (s *Session) cancelAllGets() {
 	reg := s.regGets()
 	reg.mu.Lock()
-	ids := make([]uint32, 0, len(reg.byReq))
-	for id := range reg.byReq {
-		ids = append(ids, id)
-	}
-	reg.mu.Unlock()
-	for _, id := range ids {
-		s.finaliseGet(id)
+	defer reg.mu.Unlock()
+	for id, c := range reg.byReq {
+		delete(reg.byReq, id)
+		c.closeOnce.Do(func() { close(c.replies) })
 	}
 }

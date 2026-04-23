@@ -1,0 +1,51 @@
+# Fault-injection compose for the Go interop suite.
+#
+# Topology:
+#   Go test (host) --tcp/127.0.0.1:17447--> toxiproxy --tcp/zenohd:7447--> zenohd
+#
+# The Go test creates and tears down per-test "proxies" through toxiproxy's
+# HTTP API on :8474, and applies toxics (latency, bandwidth, timeout, etc.)
+# to its own connection without affecting other tests.
+#
+# zenohd is intentionally NOT exposed on the host: every Go path that lands
+# on this compose must traverse toxiproxy. Python sessions stay on the
+# container network and reach zenohd directly at zenohd:7447.
+services:
+  zenohd:
+    image: eclipse/zenoh:1.0.0
+    command: ["--no-multicast-scouting"]
+    environment:
+      RUST_LOG: "zenoh=info"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "7447"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    command: ["-host=0.0.0.0"]
+    ports:
+      - "8474:8474"     # HTTP control plane
+      - "17447:17447"   # proxied zenohd listener (toxiproxy binds inside the container)
+    depends_on:
+      zenohd:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/toxiproxy-cli", "list"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  python:
+    build:
+      context: ./interop
+    depends_on:
+      zenohd:
+        condition: service_healthy
+    volumes:
+      - ./interop:/work
+    working_dir: /work
+    environment:
+      ZENOH_ENDPOINTS: "tcp/zenohd:7447"
+      PYTHONUNBUFFERED: "1"

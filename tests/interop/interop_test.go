@@ -204,11 +204,17 @@ func (p *pyProc) close(t *testing.T) {
 }
 
 // openGoSession connects to the host-exposed zenohd at 127.0.0.1:7447.
-func openGoSession(t *testing.T) *zenoh.Session {
+// Each tweak mutates the config after the endpoint is set, so callers can
+// override defaults like ReconnectInitial without re-specifying the
+// endpoint.
+func openGoSession(t *testing.T, tweaks ...func(*zenoh.Config)) *zenoh.Session {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cfg := zenoh.NewConfig().WithEndpoint(hostEndpoint)
+	for _, tweak := range tweaks {
+		tweak(&cfg)
+	}
 	s, err := zenoh.Open(ctx, cfg)
 	if err != nil {
 		t.Fatalf("zenoh.Open: %v", err)

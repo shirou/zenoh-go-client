@@ -1,10 +1,11 @@
-.PHONY: all build test vet fmt lint clean interop interop-stress
+.PHONY: all build test vet fmt lint clean interop interop-stress interop-fault interop-chain
 
 # Build tag conventions for tests/interop/:
 #   interop           — default interop suite, runs against default compose
 #   interop_multicast — Scout / multicast-enabled scenarios
 #   stress            — scale / large payload / high-rate; opt-in, nightly CI
-#   fault             — toxiproxy / tc netem fault injection; opt-in
+#   fault             — toxiproxy fault injection; opt-in
+#   chain             — two-router topology; opt-in
 
 all: build test
 
@@ -52,3 +53,25 @@ interop-multicast-test: interop-multicast-up
 # the default compose; ~minutes scale, not for every-commit CI.
 interop-stress: interop-up
 	go test -race -tags "interop stress" -count=1 -timeout 30m -v ./tests/interop/... ./tests/stress/...
+
+# Fault-injection suite: toxiproxy-driven latency / bandwidth / half-open
+# / unreachable scenarios. Uses its own compose (zenohd + toxiproxy).
+interop-fault-up:
+	docker compose -f tests/docker-compose.fault.yml up -d --build --wait
+
+interop-fault-down:
+	docker compose -f tests/docker-compose.fault.yml down
+
+interop-fault-test: interop-fault-up
+	go test -race -tags "interop fault" -count=1 -timeout 10m -run 'Fault' -v ./tests/interop/...
+
+# Two-router chain suite: pub/sub/get and alias resolution across
+# zenohd1 → zenohd2.
+interop-chain-up:
+	docker compose -f tests/docker-compose.chain.yml up -d --build --wait
+
+interop-chain-down:
+	docker compose -f tests/docker-compose.chain.yml down
+
+interop-chain-test: interop-chain-up
+	go test -race -tags "interop chain" -count=1 -timeout 5m -run 'Chain' -v ./tests/interop/...

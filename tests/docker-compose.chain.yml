@@ -1,0 +1,57 @@
+# Two-router chain topology.
+#
+#   Go (host) --tcp/127.0.0.1:17447--> zenohd1 ---> zenohd2 <--tcp/127.0.0.1:17448-- (Go or Python)
+#
+# zenohd2 actively connects to zenohd1, so all link state for the chain is
+# established from zenohd2's side and zenohd1 only listens. Tests connect
+# Go sessions to either router via the host ports; Python (when used)
+# defaults to zenohd2 via ZENOH_ENDPOINTS so messages traverse the chain.
+services:
+  zenohd1:
+    image: eclipse/zenoh:1.0.0
+    command:
+      - "--no-multicast-scouting"
+      - "-l=tcp/0.0.0.0:7447"
+    ports:
+      - "17447:7447"
+    environment:
+      RUST_LOG: "zenoh=info"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "7447"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  zenohd2:
+    image: eclipse/zenoh:1.0.0
+    command:
+      - "--no-multicast-scouting"
+      - "-l=tcp/0.0.0.0:7447"
+      - "-e=tcp/zenohd1:7447"
+    ports:
+      - "17448:7447"
+    depends_on:
+      zenohd1:
+        condition: service_healthy
+    environment:
+      RUST_LOG: "zenoh=info"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "7447"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  python:
+    build:
+      context: ./interop
+    depends_on:
+      zenohd1:
+        condition: service_healthy
+      zenohd2:
+        condition: service_healthy
+    volumes:
+      - ./interop:/work
+    working_dir: /work
+    environment:
+      ZENOH_ENDPOINTS: "tcp/zenohd2:7447"
+      PYTHONUNBUFFERED: "1"

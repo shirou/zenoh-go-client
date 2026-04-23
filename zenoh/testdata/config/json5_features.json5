@@ -1,0 +1,42 @@
+// Exercises the JSON5 dialect surface our parser claims to support:
+// comments, unquoted + quoted keys, single-quoted strings, trailing commas,
+// hex/scientific/leading-dot numbers, unicode / hex / line-continuation
+// escapes, and empty structures.
+{
+  /* block comment before a field */
+  mode: /* inline block */ 'client',
+
+  // unicode key is legal (identifier rules allow letters)
+  id: "\x63\x61\x66\x65", // hex-escaped "cafe"
+
+  connect: {
+    // trailing comma inside the array
+    "endpoints": [
+      'tcp/127.0.0.1:7447',
+      "tcp/[::1]:7447",
+    ],
+    retry: {
+      // leading-dot decimal + hex + scientific
+      period_init_ms: 0x1F4,            // 500
+      period_max_ms: 1e4,               // 10000
+      period_increase_factor: .5,
+    },
+  },
+
+  scouting: {
+    timeout: 3000,
+    multicast: {
+      enabled: true,
+      // line-continuation inside a string is stripped
+      address: "224.0.0.224\
+:7446",
+      interface: "auto",
+      ttl: +2,                          // explicit-sign number
+      listen: false,
+    },
+  },
+
+  // empty nested shapes should parse cleanly and be ignored
+  metadata: {},
+  plugins_loading: { search_dirs: [] },
+}

@@ -1,0 +1,11 @@
+// Scouting-only fragment. No connect endpoints — useful when the program
+// will discover a router via multicast and call zenoh.Scout before Open.
+{
+  scouting: {
+    timeout: 5000,
+    multicast: {
+      enabled: false,
+      address: "[ff02::224]:7446",
+    },
+  },
+}

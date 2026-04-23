@@ -45,3 +45,10 @@ func (l *tcpLink) WriteBatch(batch []byte) error {
 func (l *tcpLink) Close() error { return l.conn.Close() }
 
 func (l *tcpLink) RemoteLocator() locator.Locator { return l.loc }
+
+func (l *tcpLink) LocalAddress() string {
+	if a := l.conn.LocalAddr(); a != nil {
+		return a.String()
+	}
+	return ""
+}

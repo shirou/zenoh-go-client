@@ -27,6 +27,10 @@ type Link interface {
 	Close() error
 	// RemoteLocator returns the locator the link is connected to.
 	RemoteLocator() locator.Locator
+	// LocalAddress returns the string form of the local endpoint
+	// (e.g. "192.0.2.1:54321"). Empty if the transport has no meaningful
+	// local address (datagram / in-memory pipes).
+	LocalAddress() string
 }
 
 // Dialer establishes a new Link to the given locator.

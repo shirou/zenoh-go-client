@@ -1,0 +1,4 @@
+// Semantic error: ttl must be a non-negative integer.
+{
+  scouting: { multicast: { ttl: "four" } },
+}

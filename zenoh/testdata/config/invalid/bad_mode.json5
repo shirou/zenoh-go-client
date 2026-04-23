@@ -1,0 +1,5 @@
+// Semantic error: only "client" is runnable in the pure-Go client.
+{
+  mode: "router",
+  connect: { endpoints: ["tcp/127.0.0.1:7447"] },
+}

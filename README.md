@@ -146,8 +146,11 @@ Runnable variants live under [`examples/`](examples/):
 - Multi-endpoint failover during `Open`
 - **Automatic reconnect** with exponential backoff, configurable via
   `Config.ReconnectInitial` / `ReconnectMax` / `ReconnectFactor`
-  - On reconnect, every live `Subscriber` / `Queryable` / `LivelinessToken`
-    is re-declared on the fresh link — user code does not need to retry
+  - On reconnect, every live `Subscriber` / `Queryable` / `Publisher` /
+    `Querier` / `LivelinessToken` / liveliness subscriber is re-declared
+    on the fresh link — user code does not need to retry. Matching
+    listeners attached to a `Publisher` or `Querier` survive the reset
+    and re-receive the fresh snapshot (see the Matching Listener section).
 
 ### Key expressions
 
@@ -240,6 +243,57 @@ Runnable variants live under [`examples/`](examples/):
   `FifoChannel` / `RingChannel` return a channel immediately and close
   it on timeout.
 
+### Configuration
+
+`Config` can be built programmatically or loaded from JSON5:
+
+```go
+// Programmatic
+cfg := zenoh.NewConfig().WithEndpoint("tcp/127.0.0.1:7447")
+cfg.ZID = "deadbeef"
+cfg.ReconnectInitial = 500 * time.Millisecond
+
+// From a JSON5 file (Rust-compatible key paths)
+cfg, err := zenoh.NewConfigFromFile("zenoh.json5")
+
+// From an inline JSON5 string
+cfg, err := zenoh.NewConfigFromString(`{
+    mode: "client",
+    connect: {
+        endpoints: ["tcp/127.0.0.1:7447"],
+        retry: { period_init_ms: 500, period_max_ms: 4000 },
+    },
+    scouting: { multicast: { enabled: false } },
+}`)
+
+// Incremental edits via the Rust-style '/' path
+cfg.InsertJSON5("connect/endpoints", `["tcp/127.0.0.1:7447"]`)
+cfg.InsertJSON5("scouting/multicast/ttl", `4`)
+```
+
+JSON5 features supported: `//` and `/* */` comments, single-quoted strings,
+trailing commas, unquoted identifier keys, hex integer literals. Keys the
+pure-Go client does not yet understand (e.g. `transport/*`, `routing/*`) are
+silently ignored so a config file aimed at `zenohd` can be reused verbatim;
+a wrong value type at a recognised key surfaces as an error.
+
+### Introspection
+
+```go
+if info := session.LinkInfo(); info != nil {
+    fmt.Printf("connected %s ↔ %s (peer %s, batch=%d, qos=%v)\n",
+        info.LocalAddress, info.RemoteLocator,
+        info.PeerZID, info.NegotiatedBatchSize, info.QoSEnabled)
+}
+```
+
+`LinkInfo` is a snapshot of the current link (local/remote addresses, peer
+ZID + role, negotiated batch size + resolution + leases, QoS flag). Returns
+`nil` when the session is closed or mid-reconnect.
+
+Per-lane byte / message counters (cumulative traffic statistics) are not yet
+exposed — only the negotiated handshake parameters above.
+
 ### Context / cancellation
 
 - `Open(ctx, cfg)` — ctx bounds the dial + handshake
@@ -277,9 +331,8 @@ Not yet implemented, in rough priority order:
   `GetOptions.WithCancellation` accepts one; extend to liveliness Get /
   Querier Get for symmetry with zenoh-rust
 - **`SourceInfo` extension** (behind unstable)
-- **Link / Transport info API** — inspect the current link (addr, stats)
-- **Full JSON5 Config parser** — today `Config` is a flat struct; JSON5 is
-  not parsed yet
+- **Per-lane traffic counters** — cumulative byte / message / drop counters
+  on top of the existing `Session.LinkInfo` snapshot
 - **TLS**, **QUIC**, **WebSocket**, **Unix-socket**, **Serial** transports
   (dialer stubs are already registered; they return scheme-not-supported
   errors until a real implementation lands)

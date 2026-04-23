@@ -1,0 +1,2 @@
+// Parse ok but rejected at the config layer: root must be an object.
+["tcp/127.0.0.1:7447"]

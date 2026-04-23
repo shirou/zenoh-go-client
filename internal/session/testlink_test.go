@@ -40,6 +40,7 @@ func (l *pipeLink) WriteBatch(batch []byte) error {
 
 func (l *pipeLink) Close() error                   { return l.conn.Close() }
 func (l *pipeLink) RemoteLocator() locator.Locator { return l.loc }
+func (l *pipeLink) LocalAddress() string           { return "pipe" }
 
 // newPipeLinks returns a pair (client, server) connected to each other.
 func newPipeLinks() (*pipeLink, *pipeLink) {

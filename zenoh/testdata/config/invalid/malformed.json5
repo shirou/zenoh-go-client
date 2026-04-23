@@ -1,0 +1,4 @@
+// Parse error: unterminated object, no closing brace.
+{
+  connect: {
+    endpoints: ["tcp/127.0.0.1:7447"]

@@ -1,0 +1,4 @@
+// Minimal config: one endpoint, nothing else.
+{
+  connect: { endpoints: ["tcp/127.0.0.1:7447"] },
+}

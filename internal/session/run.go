@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 
 	"github.com/shirou/zenoh-go-client/internal/codec"
+	"github.com/shirou/zenoh-go-client/internal/locator"
 	"github.com/shirou/zenoh-go-client/internal/transport"
 )
 
@@ -40,6 +41,14 @@ type Runtime struct {
 	done     chan struct{}
 	link     transport.Link
 }
+
+// LinkLocalAddress returns the local endpoint string of the underlying link,
+// for surfacing through the public LinkInfo API. Empty when the transport
+// has no meaningful local address.
+func (rt *Runtime) LinkLocalAddress() string { return rt.link.LocalAddress() }
+
+// LinkRemoteLocator returns the locator the link is connected to.
+func (rt *Runtime) LinkRemoteLocator() locator.Locator { return rt.link.RemoteLocator() }
 
 // Shutdown initiates orderly teardown of this runtime. Idempotent and safe
 // to call concurrently. Returns immediately; wait on Done() for completion.

@@ -1,0 +1,28 @@
+// Every recognised key populated with a non-default value. Used to pin
+// down the full mapping from JSON5 into the Config struct.
+{
+  mode: "client",
+  id: "0123456789abcdef",
+  connect: {
+    endpoints: [
+      "tcp/127.0.0.1:7447",
+      "tcp/[::1]:7447",
+      "tcp/router.example:7447",
+    ],
+    retry: {
+      period_init_ms: 250,
+      period_max_ms: 8000,
+      period_increase_factor: 1.5,
+    },
+  },
+  scouting: {
+    timeout: 2500,
+    multicast: {
+      enabled: true,
+      address: "224.0.0.224:7446",
+      interface: "eth0",
+      ttl: 4,
+      listen: true,
+    },
+  },
+}

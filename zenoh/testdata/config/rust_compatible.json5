@@ -1,0 +1,63 @@
+// A zenohd-style config pasted verbatim from a rust DEFAULT_CONFIG.json5.
+// Many top-level and nested keys (transport/*, routing/*, timestamping/*,
+// queries_default_timeout, adminspace, plugins, metadata) are unknown to
+// the pure-Go client and must be silently dropped.
+{
+  mode: "client",
+  metadata: {
+    name: "test-node",
+    location: "lab",
+  },
+  connect: {
+    timeout_ms: 0,
+    exit_on_failure: { router: false, peer: false, client: true },
+    endpoints: ["tcp/127.0.0.1:7447"],
+    retry: {
+      period_init_ms: 1000,
+      period_max_ms: 4000,
+      period_increase_factor: 2,
+    },
+  },
+  listen: {
+    timeout_ms: 0,
+    endpoints: [],
+  },
+  scouting: {
+    timeout: 3000,
+    delay: 500,
+    multicast: {
+      enabled: true,
+      address: "224.0.0.224:7446",
+      interface: "auto",
+      ttl: 1,
+      autoconnect: { router: [], peer: ["router", "peer", "client"] },
+      listen: { router: true, peer: true, client: true },
+    },
+    gossip: {
+      enabled: true,
+      multihop: false,
+    },
+  },
+  timestamping: {
+    enabled: { router: true, peer: false, client: false },
+    drop_future_timestamp: false,
+  },
+  queries_default_timeout: 10000,
+  routing: {
+    router: { peers_failover_brokering: true },
+    peer:   { mode: "peer_to_peer" },
+  },
+  transport: {
+    unicast: {
+      accept_timeout: 10000,
+      max_sessions: 1000,
+      qos: { enabled: true },
+    },
+    link: {
+      tx: { sequence_number_resolution: "32bit" },
+      rx: { max_message_size: "1073741824" },
+    },
+  },
+  adminspace: { enabled: false },
+  plugins_loading: { enabled: false, search_dirs: [] },
+}

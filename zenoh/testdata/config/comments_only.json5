@@ -1,0 +1,9 @@
+// A config that is nothing but comments around an empty object. Should
+// produce the zero Config — every field defaulted.
+/*
+ * block comment spanning
+ * several lines
+ */
+{
+  // trailing comment before close
+}

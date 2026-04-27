@@ -172,14 +172,8 @@ func (s *Session) Run(cfg RunConfig) (*Runtime, error) {
 		writerLoop(outQ, batcher, cfg.Link, rt.stop, s.logger)
 	})
 
-	// outQSenders tracks goroutines that may write to outQ (keepalive),
-	// so the orchestrator can close outQ only after they have stopped.
-	var outQSenders sync.WaitGroup
-
 	if cfg.Result.PeerLeaseMillis > 0 {
-		outQSenders.Add(1)
 		wg.Go(func() {
-			defer outQSenders.Done()
 			keepaliveLoop(outQ, cfg.Result.PeerLeaseMillis, cfg.KeepAlive, rt.stop, s.logger)
 		})
 	}
@@ -193,9 +187,15 @@ func (s *Session) Run(cfg RunConfig) (*Runtime, error) {
 	// Orchestrator:
 	//   1. wait for the reader to exit (link EOF, peer CLOSE, or explicit Shutdown)
 	//   2. fire Shutdown (idempotent) to propagate the stop signal to other loops
-	//   3. wait for every outQ sender to stop, then close outQ so the writer drains
-	//   4. wait for all runtime goroutines to exit
-	//   5. close rt.done
+	//   3. wait for all runtime goroutines to exit
+	//   4. close rt.done
+	//
+	// outQ is intentionally never closed. The writer exits on rt.stop, and
+	// external senders (Put / sendFarewellClose) bail on LinkClosed in their
+	// own selects. Closing outQ would race against in-flight sends — the Go
+	// race detector flags a close concurrent with a chan-send even when the
+	// send arms a LinkClosed branch, so leaving outQ open keeps the contract
+	// race-free without losing any wakeup signal.
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -206,8 +206,6 @@ func (s *Session) Run(cfg RunConfig) (*Runtime, error) {
 		}()
 		<-linkClosed
 		rt.Shutdown()
-		outQSenders.Wait()
-		close(outQ)
 		wg.Wait()
 		// Cancel any in-flight Gets so their public-side translator
 		// goroutines exit. A subsequent Run() on this Session starts

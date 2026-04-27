@@ -35,7 +35,9 @@ type OutboundItem struct {
 }
 
 // writerLoop drains outQ, routes each item, and writes to the link. It exits
-// when outQ is closed or closing fires.
+// when closing fires; outQ is never closed (the orchestrator coordinates
+// shutdown through closing alone to avoid a close-vs-send race against
+// external Put senders).
 func writerLoop(
 	outQ <-chan OutboundItem,
 	batcher *transport.Batcher,
@@ -61,10 +63,7 @@ func writerLoop(
 
 	for {
 		select {
-		case item, ok := <-outQ:
-			if !ok {
-				return
-			}
+		case item := <-outQ:
 			if writeDead {
 				continue
 			}
@@ -76,11 +75,7 @@ func writerLoop(
 			// Coalesce: opportunistically drain items already queued, then
 			// flush. Bursts batch together; idle single messages still
 			// reach the wire promptly.
-			var closed bool
-			writeDead, closed = drainAvailable(outQ, batcher, link, logger, writeDead)
-			if closed {
-				return
-			}
+			writeDead = drainAvailable(outQ, batcher, link, logger, writeDead)
 		case <-closing:
 			return
 		}
@@ -88,23 +83,18 @@ func writerLoop(
 }
 
 // drainAvailable non-blockingly consumes items already sitting in outQ,
-// forwarding each through handleItem. Returns (writeDead, queueClosed):
-// queueClosed=true means the caller should exit; writeDead propagates the
-// "link write failed" latch.
+// forwarding each through handleItem. Returns the propagated "link write
+// failed" latch.
 func drainAvailable(
 	outQ <-chan OutboundItem,
 	batcher *transport.Batcher,
 	link transport.Link,
 	logger *slog.Logger,
 	writeDead bool,
-) (dead, queueClosed bool) {
+) bool {
 	for {
 		select {
-		case item, ok := <-outQ:
-			if !ok {
-				_ = batcher.FlushAll()
-				return writeDead, true
-			}
+		case item := <-outQ:
 			if writeDead {
 				continue
 			}
@@ -119,7 +109,7 @@ func drainAvailable(
 					writeDead = true
 				}
 			}
-			return writeDead, false
+			return writeDead
 		}
 	}
 }

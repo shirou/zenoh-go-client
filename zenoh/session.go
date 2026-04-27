@@ -350,12 +350,10 @@ type replayEntry struct {
 	send  func() error
 }
 
-// sendFarewellClose enqueues a best-effort CLOSE frame. The outbound
-// queue may race with the runtime orchestrator (which closes it once the
-// link goroutines exit). Runtime.LinkClosed closes strictly before OutQ
-// is closed, so observing LinkClosed as open means the send is safe; the
-// recover is a narrow safety net for the "send on closed channel" race
-// that only the Go runtime can surface here.
+// sendFarewellClose enqueues a best-effort CLOSE frame. The orchestrator
+// never closes OutQ (shutdown is signalled solely through LinkClosed), so
+// the send below cannot panic on send-to-closed; the recover stays as a
+// narrow safety net in case a future regression reintroduces the close.
 func (s *Session) sendFarewellClose() {
 	defer func() {
 		if r := recover(); r != nil {
@@ -387,8 +385,8 @@ func (s *Session) sendFarewellClose() {
 // snapshotRuntime returns the currently-live Runtime or nil if there is
 // no active link (session closed, or the reconnect loop between Runtimes).
 // Reads are atomic; a Runtime returned here remains safe to use because
-// the orchestrator closes LinkClosed before draining OutQ, and the
-// enqueueNetwork select observes LinkClosed first.
+// OutQ is never closed and the enqueueNetwork select observes LinkClosed
+// to bail out cleanly when the link goes away.
 func (s *Session) snapshotRuntime() *session.Runtime {
 	return s.runtime.Load()
 }

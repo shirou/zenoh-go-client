@@ -108,12 +108,10 @@ func (s *Session) enqueueNetwork(ctx context.Context, msg codec.Encoder, prio wi
 	if err != nil {
 		return err
 	}
-	// The runtime orchestrator closes OutQ strictly after LinkClosed
-	// closes, so in the select below we observe LinkClosed first and
-	// bail — almost always. The tight window where LinkClosed is already
-	// closed AND the orchestrator has started close(OutQ) can still
-	// surface as "send on closed channel". We convert that to
-	// ErrConnectionLost rather than propagating the panic.
+	// The orchestrator never closes OutQ — shutdown is signalled solely
+	// through LinkClosed — so the select below cannot panic on send-to-
+	// closed. The recover stays as a narrow safety net in case a future
+	// regression reintroduces the close.
 	defer func() {
 		if r := recover(); r != nil {
 			if _, ok := r.(goruntime.Error); ok {

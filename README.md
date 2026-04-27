@@ -133,8 +133,8 @@ Runnable variants live under [`examples/`](examples/):
 
 ### Transport
 
-- TCP unicast (client mode)
-- INIT / OPEN 4-message handshake
+- TCP unicast (client mode and peer mode)
+- INIT / OPEN 4-message handshake (initiator and responder)
 - Session lease + KEEPALIVE ticker
 - Lease watchdog (detects silent peer)
 - 16 QoS lanes (8 priorities × reliable / best-effort)
@@ -231,6 +231,52 @@ Runnable variants live under [`examples/`](examples/):
 - `GetMatchingStatus()` reads the current flag synchronously.
 - Auto-replayed on reconnect: matching counts reset, INTEREST is
   re-emitted, and listeners re-receive the fresh snapshot.
+
+### Peer mode
+
+Set `Config.Mode = ModePeer` to bring up a session that both dials
+configured `Endpoints` and accepts incoming connections on
+`ListenEndpoints`. Each established peer becomes its own Runtime in
+the session-wide registry; declarations made via the Session fan out
+to every peer, and `PeersZId` / `RoutersZId` enumerate the live set.
+
+```go
+cfg := zenoh.Config{
+    Mode:            zenoh.ModePeer,
+    ListenEndpoints: []string{"tcp/0.0.0.0:7447"},
+    Endpoints:       []string{"tcp/192.0.2.10:7447"}, // optional
+}
+session, _ := zenoh.Open(ctx, cfg)
+```
+
+When `Scouting.MulticastMode == MulticastAuto` (the default) and the
+session is in peer mode, scout is started in the background and
+auto-dials any HELLO whose role matches `AutoconnectMask` (default
+`WhatPeer | WhatRouter`). Simultaneous mutual dials converge to one
+canonical link per pair via a deterministic ZenohID-lex tiebreak.
+
+### Multicast peer (discovery-only)
+
+Adding a `udp/<group>:port` entry to `Endpoints` opens a multicast
+peer transport that emits JOIN every `lease/4` and refreshes a peer
+table from incoming JOINs. Peers visible on the group surface through
+`Session.MulticastPeers()`.
+
+```go
+cfg := zenoh.Config{
+    Mode:      zenoh.ModePeer,
+    Endpoints: []string{"udp/224.0.0.224:7447"},
+}
+```
+
+**Status: discovery-only.** This is sufficient to enumerate every peer
+broadcasting on the group and to surface `MulticastPeers()`, but the
+multicast FRAME / FRAGMENT data path (pub/sub propagation through the
+group) is a follow-up. For pub/sub today, combine multicast peer mode
+with a unicast peer or router endpoint.
+
+Multicast is exercised on Linux. Windows / macOS multicast routing
+varies by host configuration; use at your own risk.
 
 ### Discovery (Scout)
 
@@ -339,7 +385,10 @@ Not yet implemented, in rough priority order:
 - **Auth extension** (username/password, public-key)
 - **LowLatency mode** (INIT extension 0x5)
 - **Compression extension** (0x6)
-- **Peer role** + **multicast JOIN**
+- **Multicast pub/sub propagation** — multicast peer mode is currently
+  discovery-only (JOIN emit + receive + peer table); FRAME / FRAGMENT
+  forwarding through the group, per-peer reassembly, and FRAME seq-num
+  monotonicity checks are deferred follow-ups
 - **Patch ≥ 1 wire features** (`BlockFirst`, FRAGMENT First/Drop markers)
 - Port the remaining upstream examples (`z_pub_thr`, `z_ping`, `z_pong`, …)
 - Benchmark suite

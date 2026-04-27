@@ -87,6 +87,11 @@ type Session struct {
 	// mode. Close iterates them.
 	listenersMu sync.Mutex
 	listeners   []transport.Listener
+
+	// multicastRuntimes holds every MulticastRuntime opened for a UDP
+	// endpoint in peer mode. Close iterates them.
+	multicastMu       sync.Mutex
+	multicastRuntimes []*session.MulticastRuntime
 }
 
 // Open dials the first reachable endpoint in cfg.Endpoints, completes the
@@ -182,8 +187,38 @@ func (s *Session) Close() error {
 		rt.Shutdown()
 	})
 	s.closeAllListeners()
+	s.closeAllMulticastRuntimes()
 	<-s.done
 	return nil
+}
+
+// closeAllMulticastRuntimes closes every MulticastRuntime registered by
+// the peer-mode supervisor. Idempotent.
+func (s *Session) closeAllMulticastRuntimes() {
+	s.multicastMu.Lock()
+	rts := s.multicastRuntimes
+	s.multicastRuntimes = nil
+	s.multicastMu.Unlock()
+	for _, rt := range rts {
+		_ = rt.Close()
+	}
+}
+
+// MulticastPeers returns the ZenohIDs of every peer currently visible
+// on a multicast group this session participates in. Multicast peer
+// mode is discovery-only at the moment; this lets callers inspect the
+// peer table without exposing the lower-level MulticastPeerEntry type.
+func (s *Session) MulticastPeers() []Id {
+	s.multicastMu.Lock()
+	rts := append([]*session.MulticastRuntime{}, s.multicastRuntimes...)
+	s.multicastMu.Unlock()
+	var out []Id
+	for _, rt := range rts {
+		for _, e := range rt.Table().Snapshot() {
+			out = append(out, IdFromWireID(e.ZID))
+		}
+	}
+	return out
 }
 
 // closeAllListeners closes every transport.Listener registered by the

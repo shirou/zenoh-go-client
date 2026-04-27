@@ -29,12 +29,82 @@ func (s *Session) openPeer(ctx context.Context) error {
 		s.listenersMu.Unlock()
 		s.peerWG.Go(func() { s.runAcceptLoop(ln) })
 	}
-	for _, ep := range s.cfg.Endpoints {
+	udpEndpoints, tcpEndpoints := splitMulticastEndpoints(s.cfg.Endpoints)
+	for _, ep := range tcpEndpoints {
 		s.peerWG.Go(func() { s.runOutboundLoop(ep) })
+	}
+	for _, ep := range udpEndpoints {
+		if err := s.startMulticastEndpoint(ep); err != nil {
+			s.inner.Logger().Warn("multicast peer endpoint failed", "endpoint", ep, "err", err)
+		}
 	}
 	if s.cfg.Scouting.MulticastMode != MulticastOff {
 		s.peerWG.Go(s.runScoutDiscovery)
 	}
+	return nil
+}
+
+// splitMulticastEndpoints partitions Endpoints into UDP (multicast peer
+// transports) and everything else (TCP today, TLS/QUIC eventually). The
+// Mode/Endpoints split keeps the call sites simple at the cost of one
+// scheme parse per entry.
+func splitMulticastEndpoints(eps []string) (udp, other []string) {
+	for _, ep := range eps {
+		loc, err := locator.Parse(ep)
+		if err != nil {
+			other = append(other, ep)
+			continue
+		}
+		if loc.Scheme == locator.SchemeUDP {
+			udp = append(udp, ep)
+		} else {
+			other = append(other, ep)
+		}
+	}
+	return udp, other
+}
+
+// startMulticastEndpoint dials the given multicast group locator and
+// starts a JOIN-driven MulticastRuntime against it. Pub/sub propagation
+// is not yet wired — the runtime is discovery-only at present, so
+// declarations on this Session still need a unicast peer or router for
+// data delivery.
+func (s *Session) startMulticastEndpoint(endpoint string) error {
+	loc, err := locator.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("parse %q: %w", endpoint, err)
+	}
+	link, err := transport.DialMulticastUDP(loc, transport.MulticastDialOpts{
+		Interface:        nil,
+		TTL:              s.cfg.Scouting.MulticastTTL,
+		LoopbackDisabled: true, // do not register our own JOIN as a peer
+	})
+	if err != nil {
+		return fmt.Errorf("dial multicast %q: %w", endpoint, err)
+	}
+	rt, err := s.inner.StartMulticastPeer(session.MulticastConfig{
+		Link:        link,
+		ZID:         s.zid.ToWireID(),
+		WhatAmI:     sessionModeToWire(s.cfg.Mode),
+		LeaseMillis: 10000,
+		BatchSize:   uint16(transport.MulticastBatchSize),
+		Logger:      s.inner.Logger(),
+	})
+	if err != nil {
+		_ = link.Close()
+		return err
+	}
+	s.multicastMu.Lock()
+	s.multicastRuntimes = append(s.multicastRuntimes, rt)
+	s.multicastMu.Unlock()
+	// When the user closes the session, master ctx → cancel → runtime
+	// observes via its own ctx. Tie that here so peerWG.Wait blocks until
+	// the runtime exits.
+	closeCtx := s.userCloseCtx()
+	s.peerWG.Go(func() {
+		<-closeCtx.Done()
+		_ = rt.Close()
+	})
 	return nil
 }
 

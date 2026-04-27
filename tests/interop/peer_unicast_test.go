@@ -13,12 +13,14 @@ import (
 	"github.com/shirou/zenoh-go-client/zenoh"
 )
 
-// peerInteropAddr is the host port the Go peer binds for these tests.
-// The Makefile target ships a compose override that maps
-// host.docker.internal:7461 → host:7461 so the Python container can
-// reach it; the test sets ZENOH_PEER_INTEROP=1 once that override is
-// in play.
-const peerInteropAddr = "127.0.0.1:7461"
+// peerInteropPort is the host port the Go peer binds for these tests.
+// The Go peer must listen on 0.0.0.0 so the Python container can reach
+// it via host.docker.internal (which on Linux resolves to the docker
+// bridge interface on the host, not loopback). Local sanity checks use
+// 127.0.0.1 since that always resolves to the same listener.
+const peerInteropPort = "7461"
+const peerInteropBindAddr = "0.0.0.0:" + peerInteropPort
+const peerInteropLocalDialAddr = "127.0.0.1:" + peerInteropPort
 
 // peerInteropEnabled gates the test on the harness flag the Makefile
 // sets when the matching compose override is loaded. Without it the Go
@@ -46,7 +48,7 @@ func TestGoPeerPySubscribe(t *testing.T) {
 	// Bring the Go peer up first so the python script's connect succeeds.
 	cfg := zenoh.Config{
 		Mode:            zenoh.ModePeer,
-		ListenEndpoints: []string{"tcp/" + peerInteropAddr},
+		ListenEndpoints: []string{"tcp/" + peerInteropBindAddr},
 		Scouting:        zenoh.ScoutingConfig{MulticastMode: zenoh.MulticastOff},
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -57,7 +59,7 @@ func TestGoPeerPySubscribe(t *testing.T) {
 	}
 	defer session.Close()
 
-	if err := waitForTCP(peerInteropAddr, 2*time.Second); err != nil {
+	if err := waitForTCP(peerInteropLocalDialAddr, 2*time.Second); err != nil {
 		t.Fatalf("listener not ready: %v", err)
 	}
 

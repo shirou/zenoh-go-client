@@ -4,6 +4,8 @@ import argparse
 import json
 import os
 import sys
+import threading
+import time
 
 import zenoh
 
@@ -11,7 +13,10 @@ from python_common import DONE, READY, emit, sample_to_json
 
 
 def open_peer_session() -> zenoh.Session:
-    endpoint = os.environ.get("ZENOH_ENDPOINTS", "tcp/127.0.0.1:7447")
+    # Peer-mode tests use ZENOH_PEER_ENDPOINT specifically so the override
+    # does not collide with ZENOH_ENDPOINTS (used by every router-based
+    # python_*.py script in the same container).
+    endpoint = os.environ.get("ZENOH_PEER_ENDPOINT", "tcp/host.docker.internal:7461")
     cfg = zenoh.Config()
     cfg.insert_json5("mode", '"peer"')
     cfg.insert_json5("connect/endpoints", json.dumps([endpoint]))
@@ -27,21 +32,25 @@ def main() -> int:
 
     with open_peer_session() as session:
         received = 0
+        done = threading.Event()
 
         def on_sample(sample) -> None:
             nonlocal received
             emit(sample_to_json(sample))
             received += 1
+            if received >= args.count:
+                done.set()
 
         sub = session.declare_subscriber(args.key, on_sample)
         emit(READY)
 
-        # Spin until we have the requested count or stdin closes.
-        while received < args.count:
-            line = sys.stdin.readline()
-            if not line:
-                break
+        # Block on the event the callback flips, with a 30s safety timeout
+        # so a missed sample doesn't hang the harness forever.
+        done.wait(timeout=30.0)
         sub.undeclare()
+        # Give the U_SUBSCRIBER a moment to flush before tearing the
+        # session down — mirrors python_pub.py's pre-close sleep.
+        time.sleep(0.2)
         emit(DONE)
     return 0
 

@@ -18,7 +18,10 @@ from python_common import DONE, GO, READY, emit
 
 
 def open_peer_session() -> zenoh.Session:
-    endpoint = os.environ.get("ZENOH_ENDPOINTS", "tcp/127.0.0.1:7447")
+    # Peer-mode tests use ZENOH_PEER_ENDPOINT specifically so the override
+    # does not collide with ZENOH_ENDPOINTS (used by every router-based
+    # python_*.py script in the same container).
+    endpoint = os.environ.get("ZENOH_PEER_ENDPOINT", "tcp/host.docker.internal:7461")
     cfg = zenoh.Config()
     cfg.insert_json5("mode", '"peer"')
     cfg.insert_json5("connect/endpoints", json.dumps([endpoint]))

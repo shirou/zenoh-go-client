@@ -31,10 +31,12 @@ type Session struct {
 	closed  atomic.Bool
 	done    chan struct{} // closed when reconnect goroutine has exited
 
-	// runtime is swapped atomically by the reconnect orchestrator so the
-	// hot path (every Put / Get / Declare through snapshotRuntime) stays
-	// lock-free.
-	runtime atomic.Pointer[session.Runtime]
+	// curRuntime is the reconnect orchestrator's view of the live client
+	// runtime, swapped atomically so the hot path stays lock-free. The
+	// inner session.runtimes registry is the authoritative multi-Runtime
+	// store for peer mode; in client mode this pointer mirrors the
+	// singleton entry of that map.
+	curRuntime atomic.Pointer[session.Runtime]
 
 	// tokens tracks LivelinessTokens for replay on reconnect. Subscribers
 	// and queryables survive via the inner session's registries; tokens
@@ -97,10 +99,30 @@ func Open(ctx context.Context, cfg Config) (*Session, error) {
 		_ = inner.Close()
 		return nil, err
 	}
-	s.runtime.Store(rt)
+	s.installRuntime(rt)
 
 	go s.runReconnectLoop()
 	return s, nil
+}
+
+// installRuntime registers rt in the inner Session's runtime registry and
+// updates curRuntime so the hot path picks it up.
+func (s *Session) installRuntime(rt *session.Runtime) {
+	if rt == nil {
+		return
+	}
+	s.inner.RegisterRuntime(rt.PeerZIDBytes(), rt)
+	s.curRuntime.Store(rt)
+}
+
+// uninstallRuntime is the inverse of installRuntime; called when a runtime
+// finishes tearing down so the registry no longer references it.
+func (s *Session) uninstallRuntime(rt *session.Runtime) {
+	if rt == nil {
+		return
+	}
+	s.inner.UnregisterRuntime(rt.PeerZIDBytes(), rt)
+	s.curRuntime.CompareAndSwap(rt, nil)
 }
 
 // Close terminates the session, signalling the reconnect orchestrator to
@@ -112,11 +134,13 @@ func (s *Session) Close() error {
 	}
 	s.sendFarewellClose()
 	// Signal the inner session to stop reconnecting and shut the current
-	// runtime down; the orchestrator then joins everything.
+	// runtime down; the orchestrator then joins everything. ForEachRuntime
+	// covers both client mode (singleton) and peer mode (one runtime per
+	// remote peer).
 	_ = s.inner.Close()
-	if rt := s.runtime.Load(); rt != nil {
+	s.inner.ForEachRuntime(func(_ []byte, rt *session.Runtime) {
 		rt.Shutdown()
-	}
+	})
 	<-s.done
 	return nil
 }
@@ -167,12 +191,13 @@ func (s *Session) runReconnectLoop() {
 	logger := s.inner.Logger()
 
 	for {
-		rt := s.runtime.Load()
+		rt := s.curRuntime.Load()
 		if rt == nil {
 			return
 		}
 		// Wait for the current runtime to finish tearing down.
 		<-rt.Done()
+		s.uninstallRuntime(rt)
 
 		// User Close? Stop here.
 		select {
@@ -192,7 +217,7 @@ func (s *Session) runReconnectLoop() {
 			return
 		}
 
-		s.runtime.Store(newRt)
+		s.installRuntime(newRt)
 
 		if err := s.replayEntities(); err != nil {
 			logger.Warn("reconnect: entity replay failed", "err", err)
@@ -267,15 +292,9 @@ func (s *Session) userCloseCtx() context.Context {
 // once per successful reconnect, before the session is handed back to
 // the caller.
 //
-// Each registry is snapshotted into a slice of replayEntry closures with
-// its own lock released before any send fires — holding a registry lock
-// across a blocking enqueueNetwork would serialise declare / undeclare
-// calls for the full duration of replay.
-//
-// Inbound-only caches (remote ExprID aliases, router-assigned token
-// entity_ids) are wiped first: the new session starts from a blank
-// namespace, so keeping stale mappings risks resolving a future
-// D_KEYEXPR / U_TOKEN to the wrong key.
+// In client mode there is exactly one Runtime, so this is equivalent to
+// replayToRuntime against that singleton. The thin wrapper exists so
+// peer-mode lifecycle code can target a specific newly-installed Link.
 func (s *Session) replayEntities() error {
 	s.inner.ResetRemoteAliases()
 	s.inner.ResetInboundTokens()
@@ -284,25 +303,41 @@ func (s *Session) replayEntities() error {
 	// correct state. Listeners survive the reset.
 	s.inner.ResetMatching()
 
+	rt := s.snapshotRuntime()
+	if rt == nil {
+		return ErrSessionNotReady
+	}
+	return s.replayToRuntime(rt)
+}
+
+// replayToRuntime emits the catch-up declarations to the given Runtime.
+// Each registry is snapshotted into a slice of replayEntry closures with
+// its own lock released before any send fires — holding a registry lock
+// across a blocking enqueue would serialise declare / undeclare calls
+// for the full duration of replay.
+func (s *Session) replayToRuntime(rt *session.Runtime) error {
+	if rt == nil {
+		return ErrSessionNotReady
+	}
 	var plan []replayEntry
 
 	s.inner.ForEachSubscriber(func(id uint32, ke intkeyexpr.KeyExpr) {
 		k := KeyExpr{inner: ke}
 		plan = append(plan, replayEntry{id, "D_SUBSCRIBER", func() error {
-			return s.sendDeclareSubscriber(id, k)
+			return s.sendDeclareSubscriberOn(rt, id, k)
 		}})
 	})
 	s.inner.ForEachQueryable(func(id uint32, ke intkeyexpr.KeyExpr, complete bool) {
 		k := KeyExpr{inner: ke}
 		opts := &QueryableOptions{Complete: complete}
 		plan = append(plan, replayEntry{id, "D_QUERYABLE", func() error {
-			return s.sendDeclareQueryable(id, k, opts)
+			return s.sendDeclareQueryableOn(rt, id, k, opts)
 		}})
 	})
 	s.tokensMu.Lock()
 	for id, ke := range s.tokens {
 		plan = append(plan, replayEntry{id, "D_TOKEN", func() error {
-			return s.sendDeclareToken(id, ke)
+			return s.sendDeclareTokenOn(rt, id, ke)
 		}})
 	}
 	s.tokensMu.Unlock()
@@ -310,7 +345,7 @@ func (s *Session) replayEntities() error {
 	for id, q := range s.queriers {
 		ke := q.keyExpr
 		plan = append(plan, replayEntry{id, "INTEREST", func() error {
-			return s.sendQuerierInterest(id, ke)
+			return s.sendQuerierInterestOn(rt, id, ke)
 		}})
 	}
 	s.queriersMu.Unlock()
@@ -318,7 +353,7 @@ func (s *Session) replayEntities() error {
 	for id, p := range s.publishers {
 		ke := p.keyExpr
 		plan = append(plan, replayEntry{id, "INTEREST[publisher]", func() error {
-			return s.sendPublisherInterest(id, ke)
+			return s.sendPublisherInterestOn(rt, id, ke)
 		}})
 	}
 	s.publishersMu.Unlock()
@@ -327,7 +362,7 @@ func (s *Session) replayEntities() error {
 		ke := st.keyExpr
 		history := st.history
 		plan = append(plan, replayEntry{id, "INTEREST[liveliness]", func() error {
-			return s.sendLivelinessSubscriberInterest(id, ke, history)
+			return s.sendLivelinessSubscriberInterestOn(rt, id, ke, history)
 		}})
 	}
 	s.livelinessSubsMu.Unlock()
@@ -387,8 +422,20 @@ func (s *Session) sendFarewellClose() {
 // Reads are atomic; a Runtime returned here remains safe to use because
 // OutQ is never closed and the enqueueNetwork select observes LinkClosed
 // to bail out cleanly when the link goes away.
+//
+// In peer mode there may be multiple live Runtimes — this returns the
+// reconnect orchestrator's "current" pointer, which is non-deterministic.
+// Callers that need to fan out to every peer should use
+// snapshotAllRuntimes instead.
 func (s *Session) snapshotRuntime() *session.Runtime {
-	return s.runtime.Load()
+	return s.curRuntime.Load()
+}
+
+// snapshotAllRuntimes returns every currently-live Runtime. Empty in
+// client mode while the link is down; in peer mode includes every
+// established remote peer.
+func (s *Session) snapshotAllRuntimes() []*session.Runtime {
+	return s.inner.SnapshotRuntimes()
 }
 
 // resolveZID parses hex or falls back to a fresh random ID.

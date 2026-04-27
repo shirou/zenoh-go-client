@@ -150,13 +150,22 @@ func (q *Querier) mergeGetOptions(call *QuerierGetOptions) *GetOptions {
 
 // sendQuerierInterest emits INTEREST[Mode=CurrentFuture, Q, restricted=ke].
 func (s *Session) sendQuerierInterest(id uint32, ke KeyExpr) error {
+	return s.enqueueControl(buildQuerierInterest(id, ke))
+}
+
+// sendQuerierInterestOn is the per-Runtime variant for replay.
+func (s *Session) sendQuerierInterestOn(rt *session.Runtime, id uint32, ke KeyExpr) error {
+	return s.enqueueControlOn(rt, buildQuerierInterest(id, ke))
+}
+
+func buildQuerierInterest(id uint32, ke KeyExpr) *wire.Interest {
 	wexpr := ke.toWire()
-	return s.enqueueControl(&wire.Interest{
+	return &wire.Interest{
 		InterestID: id,
 		Mode:       wire.InterestModeCurrentFuture,
 		Filter:     wire.InterestFilter{Queryables: true},
 		KeyExpr:    &wexpr,
-	})
+	}
 }
 
 // sendInterestFinal emits INTEREST[Mode=Final] for id. Tear-down path for

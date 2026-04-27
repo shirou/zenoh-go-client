@@ -50,6 +50,15 @@ func (rt *Runtime) LinkLocalAddress() string { return rt.link.LocalAddress() }
 // LinkRemoteLocator returns the locator the link is connected to.
 func (rt *Runtime) LinkRemoteLocator() locator.Locator { return rt.link.RemoteLocator() }
 
+// PeerZIDBytes returns the remote peer's ZenohID bytes, for use as a key
+// in the Session.runtimes registry.
+func (rt *Runtime) PeerZIDBytes() []byte {
+	if rt.Result == nil {
+		return nil
+	}
+	return rt.Result.PeerZID.Bytes
+}
+
 // Shutdown initiates orderly teardown of this runtime. Idempotent and safe
 // to call concurrently. Returns immediately; wait on Done() for completion.
 func (rt *Runtime) Shutdown() {

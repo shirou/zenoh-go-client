@@ -11,6 +11,7 @@ import (
 
 	intkeyexpr "github.com/shirou/zenoh-go-client/internal/keyexpr"
 	"github.com/shirou/zenoh-go-client/internal/session"
+	"github.com/shirou/zenoh-go-client/internal/transport"
 	"github.com/shirou/zenoh-go-client/internal/wire"
 )
 
@@ -78,15 +79,34 @@ type Session struct {
 	// cached. Used by dialContext to cancel in-flight dials on Close.
 	userCtxOnce sync.Once
 	userCtx     context.Context
+
+	// peerWG tracks per-endpoint dial loops + accept loops + per-runtime
+	// watcher goroutines spawned in peer mode. Close awaits them.
+	peerWG sync.WaitGroup
+	// listeners is the list of bound transport.Listener instances in peer
+	// mode. Close iterates them.
+	listenersMu sync.Mutex
+	listeners   []transport.Listener
 }
 
 // Open dials the first reachable endpoint in cfg.Endpoints, completes the
 // INIT/OPEN handshake, and starts the session's goroutines. The returned
 // Session remains usable across subsequent link failures — the reconnect
 // orchestrator restores declared entities automatically.
+//
+// In peer mode (cfg.Mode == ModePeer) Open additionally binds every
+// listen endpoint and starts an outbound dial loop per connect endpoint,
+// returning once the listeners are bound. Outbound dials retry in the
+// background.
 func Open(ctx context.Context, cfg Config) (*Session, error) {
-	if len(cfg.Endpoints) == 0 {
+	if cfg.Mode == ModeRouter {
+		return nil, fmt.Errorf("zenoh.Open: router mode is not yet implemented")
+	}
+	if cfg.Mode == ModeClient && len(cfg.Endpoints) == 0 {
 		return nil, fmt.Errorf("zenoh.Open: Config.Endpoints is empty")
+	}
+	if cfg.Mode == ModePeer && len(cfg.Endpoints) == 0 && len(cfg.ListenEndpoints) == 0 {
+		return nil, fmt.Errorf("zenoh.Open: peer mode requires connect or listen endpoints")
 	}
 
 	zid, err := resolveZID(cfg.ZID)
@@ -105,6 +125,15 @@ func Open(ctx context.Context, cfg Config) (*Session, error) {
 		queriers:             make(map[uint32]*querierState),
 		publishers:           make(map[uint32]*publisherState),
 		livelinessSubsReplay: make(map[uint32]livelinessSubReplayState),
+	}
+
+	if cfg.Mode == ModePeer {
+		if err := s.openPeer(ctx); err != nil {
+			_ = inner.Close()
+			return nil, err
+		}
+		go s.runPeerSupervisor()
+		return s, nil
 	}
 
 	rt, err := s.dialAndRun(ctx)
@@ -139,23 +168,34 @@ func (s *Session) uninstallRuntime(rt *session.Runtime) {
 }
 
 // Close terminates the session, signalling the reconnect orchestrator to
-// stop, sending a best-effort CLOSE to the peer, and waiting for all
-// goroutines to finish.
+// stop, sending a best-effort CLOSE to every peer, closing every listener,
+// and waiting for all goroutines to finish.
 func (s *Session) Close() error {
 	if !s.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	s.sendFarewellClose()
-	// Signal the inner session to stop reconnecting and shut the current
-	// runtime down; the orchestrator then joins everything. ForEachRuntime
-	// covers both client mode (singleton) and peer mode (one runtime per
-	// remote peer).
+	s.broadcastFarewellClose()
+	// Signal the inner session to stop reconnecting and shut every
+	// runtime down; per-mode supervisor then joins everything.
 	_ = s.inner.Close()
 	s.inner.ForEachRuntime(func(_ []byte, rt *session.Runtime) {
 		rt.Shutdown()
 	})
+	s.closeAllListeners()
 	<-s.done
 	return nil
+}
+
+// closeAllListeners closes every transport.Listener registered by the
+// peer-mode supervisor. Idempotent.
+func (s *Session) closeAllListeners() {
+	s.listenersMu.Lock()
+	lns := s.listeners
+	s.listeners = nil
+	s.listenersMu.Unlock()
+	for _, ln := range lns {
+		_ = ln.Close()
+	}
 }
 
 // IsClosed reports whether Close has been called.
@@ -163,6 +203,29 @@ func (s *Session) IsClosed() bool { return s.closed.Load() }
 
 // ZId returns the session's local ZenohID.
 func (s *Session) ZId() Id { return s.zid }
+
+// PeersZId returns the ZenohIDs of every currently-connected peer
+// session — i.e. remote peers whose handshake advertised Peer. Empty in
+// client mode and whenever no live peer Runtime is registered.
+func (s *Session) PeersZId() []Id { return s.peerIDsByRole(wire.WhatAmIPeer) }
+
+// RoutersZId returns the ZenohIDs of every currently-connected router.
+// In client mode this is at most one router; in peer mode it lists all
+// routers a peer has dialled.
+func (s *Session) RoutersZId() []Id { return s.peerIDsByRole(wire.WhatAmIRouter) }
+
+func (s *Session) peerIDsByRole(role wire.WhatAmI) []Id {
+	var out []Id
+	s.inner.ForEachRuntime(func(_ []byte, rt *session.Runtime) {
+		if rt.Result == nil {
+			return
+		}
+		if rt.Result.PeerWhatAmI == role {
+			out = append(out, IdFromWireID(rt.Result.PeerZID))
+		}
+	})
+	return out
+}
 
 // dialAndRun dials, handshakes, and starts a fresh Runtime. Used both for
 // Open and for each reconnect attempt.
@@ -398,11 +461,18 @@ type replayEntry struct {
 	send  func() error
 }
 
-// sendFarewellClose enqueues a best-effort CLOSE frame. The orchestrator
-// never closes OutQ (shutdown is signalled solely through LinkClosed), so
-// the send below cannot panic on send-to-closed; the recover stays as a
-// narrow safety net in case a future regression reintroduces the close.
-func (s *Session) sendFarewellClose() {
+// broadcastFarewellClose enqueues a best-effort CLOSE frame to every
+// live Runtime. The orchestrator never closes OutQ (shutdown is
+// signalled solely through LinkClosed), so the sends below cannot panic
+// on send-to-closed; the recover in farewellTo stays as a narrow safety
+// net in case a future regression reintroduces the close.
+func (s *Session) broadcastFarewellClose() {
+	for _, rt := range s.inner.SnapshotRuntimes() {
+		s.farewellTo(rt)
+	}
+}
+
+func (s *Session) farewellTo(rt *session.Runtime) {
 	defer func() {
 		if r := recover(); r != nil {
 			if _, ok := r.(runtime.Error); !ok {
@@ -410,7 +480,6 @@ func (s *Session) sendFarewellClose() {
 			}
 		}
 	}()
-	rt := s.snapshotRuntime()
 	if rt == nil {
 		return
 	}

@@ -182,9 +182,20 @@ func (s *Session) uninstallRuntime(rt *session.Runtime) {
 	s.curRuntime.CompareAndSwap(rt, nil)
 }
 
+// closeDrainTimeout bounds how long Close waits for each runtime to flush
+// pending outbound items before tearing the link down. A misbehaving link
+// or a sustained sender can keep the writer busy past this deadline; we
+// then fall back to the fast-stop path so Close itself can never hang.
+const closeDrainTimeout = 2 * time.Second
+
 // Close terminates the session, signalling the reconnect orchestrator to
 // stop, sending a best-effort CLOSE to every peer, closing every listener,
 // and waiting for all goroutines to finish.
+//
+// Each runtime is given closeDrainTimeout to flush pending outQ items
+// (including the farewell CLOSE) before its link is torn down, so a
+// fire-and-forget Put / Delete immediately followed by Close still
+// reaches the peer.
 func (s *Session) Close() error {
 	if !s.closed.CompareAndSwap(false, true) {
 		return nil
@@ -194,7 +205,7 @@ func (s *Session) Close() error {
 	// runtime down; per-mode supervisor then joins everything.
 	_ = s.inner.Close()
 	s.inner.ForEachRuntime(func(_ []byte, rt *session.Runtime) {
-		rt.Shutdown()
+		rt.GracefulShutdown(closeDrainTimeout)
 	})
 	s.closeAllListeners()
 	s.closeAllMulticastRuntimes()

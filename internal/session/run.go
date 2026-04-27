@@ -5,6 +5,7 @@ import (
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/shirou/zenoh-go-client/internal/codec"
 	"github.com/shirou/zenoh-go-client/internal/locator"
@@ -36,10 +37,16 @@ type Runtime struct {
 	// Private runtime state: stop/done are closed by the runtime
 	// orchestrator; link is held so Shutdown can poke the reader into exit
 	// via link.Close().
-	stop     chan struct{}
-	stopOnce sync.Once
-	done     chan struct{}
-	link     transport.Link
+	stop chan struct{}
+	// drain, when closed by GracefulShutdown, signals the writer to flush
+	// remaining outQ items and then exit. writerDone is closed by the
+	// writer on exit so GracefulShutdown can wait for the flush before
+	// tearing the link down.
+	drain      chan struct{}
+	writerDone chan struct{}
+	stopOnce   sync.Once
+	done       chan struct{}
+	link       transport.Link
 }
 
 // LinkLocalAddress returns the local endpoint string of the underlying link,
@@ -61,8 +68,34 @@ func (rt *Runtime) PeerZIDBytes() []byte {
 
 // Shutdown initiates orderly teardown of this runtime. Idempotent and safe
 // to call concurrently. Returns immediately; wait on Done() for completion.
+//
+// This is the fast-stop path: the link is closed before the writer can
+// flush, so any items still sitting in outQ are abandoned. Use
+// GracefulShutdown when pending writes must reach the wire (e.g. a
+// fire-and-forget Put followed by Session.Close).
 func (rt *Runtime) Shutdown() {
 	rt.stopOnce.Do(func() {
+		_ = rt.link.Close()
+		close(rt.stop)
+	})
+}
+
+// GracefulShutdown lets the writer flush remaining outQ items (up to
+// timeout) before the link is torn down, so a fire-and-forget Put
+// immediately followed by Session.Close still reaches the peer.
+// Idempotent and safe to call concurrently with Shutdown — whichever
+// runs first wins via stopOnce.
+//
+// timeout bounds the drain: a misbehaving link or sustained sender keeps
+// the writer busy past the deadline, after which we fall back to the
+// fast-stop path (close link → writer unblocks with net.ErrClosed → exit).
+func (rt *Runtime) GracefulShutdown(timeout time.Duration) {
+	rt.stopOnce.Do(func() {
+		close(rt.drain)
+		select {
+		case <-rt.writerDone:
+		case <-time.After(timeout):
+		}
 		_ = rt.link.Close()
 		close(rt.stop)
 	})
@@ -184,6 +217,8 @@ func (s *Session) Run(cfg RunConfig) (*Runtime, error) {
 		PeerClose:  peerClose,
 		LastRecvMs: lastRecv,
 		stop:       make(chan struct{}),
+		drain:      make(chan struct{}),
+		writerDone: make(chan struct{}),
 		done:       make(chan struct{}),
 		link:       cfg.Link,
 	}
@@ -211,7 +246,7 @@ func (s *Session) Run(cfg RunConfig) (*Runtime, error) {
 	})
 
 	wg.Go(func() {
-		writerLoop(outQ, batcher, cfg.Link, rt.stop, s.logger)
+		writerLoop(outQ, batcher, cfg.Link, rt.stop, rt.drain, rt.writerDone, s.logger)
 	})
 
 	if cfg.Result.PeerLeaseMillis > 0 {

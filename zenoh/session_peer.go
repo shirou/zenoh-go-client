@@ -353,9 +353,11 @@ func (s *Session) startRuntimeForPeer(link transport.Link, result *session.Hands
 		if !newCanonical {
 			// Existing wins. Close our link without ever spinning up a
 			// runtime — that way the remote side, which kept this link's
-			// far end, doesn't see it drop.
+			// far end, doesn't see it drop. Hand the surviving runtime
+			// back so a dial-loop caller has something to observe via
+			// Done() instead of dereferencing nil.
 			_ = link.Close()
-			return nil, nil
+			return existing, nil
 		}
 		// New connection wins — drop the old one before installing.
 		existing.Shutdown()

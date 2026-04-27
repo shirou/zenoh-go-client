@@ -17,7 +17,18 @@ import (
 // Listeners are bound synchronously so the returned session is
 // guaranteed to be reachable when Open returns; outbound dials retry in
 // the background.
+//
+// Endpoints are parse-validated up front so a malformed entry fails Open
+// immediately rather than feeding an infinite log-spam retry loop.
 func (s *Session) openPeer(ctx context.Context) error {
+	udpEndpoints, tcpEndpoints, err := splitMulticastEndpoints(s.cfg.Endpoints)
+	if err != nil {
+		return fmt.Errorf("connect endpoint: %w", err)
+	}
+	if err := validateEndpointsParse(s.cfg.ListenEndpoints); err != nil {
+		return fmt.Errorf("listen endpoint: %w", err)
+	}
+
 	for _, ep := range s.cfg.ListenEndpoints {
 		ln, err := s.bindListener(ctx, ep)
 		if err != nil {
@@ -29,7 +40,6 @@ func (s *Session) openPeer(ctx context.Context) error {
 		s.listenersMu.Unlock()
 		s.peerWG.Go(func() { s.runAcceptLoop(ln) })
 	}
-	udpEndpoints, tcpEndpoints := splitMulticastEndpoints(s.cfg.Endpoints)
 	for _, ep := range tcpEndpoints {
 		s.peerWG.Go(func() { s.runOutboundLoop(ep) })
 	}
@@ -45,15 +55,14 @@ func (s *Session) openPeer(ctx context.Context) error {
 }
 
 // splitMulticastEndpoints partitions Endpoints into UDP (multicast peer
-// transports) and everything else (TCP today, TLS/QUIC eventually). The
-// Mode/Endpoints split keeps the call sites simple at the cost of one
-// scheme parse per entry.
-func splitMulticastEndpoints(eps []string) (udp, other []string) {
+// transports) and everything else (TCP today, TLS/QUIC eventually). A
+// parse failure is surfaced as an error so the caller can fail Open
+// instead of letting the bad endpoint loop forever in runOutboundLoop.
+func splitMulticastEndpoints(eps []string) (udp, other []string, err error) {
 	for _, ep := range eps {
-		loc, err := locator.Parse(ep)
-		if err != nil {
-			other = append(other, ep)
-			continue
+		loc, perr := locator.Parse(ep)
+		if perr != nil {
+			return nil, nil, fmt.Errorf("invalid endpoint %q: %w", ep, perr)
 		}
 		if loc.Scheme == locator.SchemeUDP {
 			udp = append(udp, ep)
@@ -61,7 +70,19 @@ func splitMulticastEndpoints(eps []string) (udp, other []string) {
 			other = append(other, ep)
 		}
 	}
-	return udp, other
+	return udp, other, nil
+}
+
+// validateEndpointsParse checks every entry parses as a locator. Used for
+// listen endpoints, where the dial-side equivalents are already covered
+// by splitMulticastEndpoints.
+func validateEndpointsParse(eps []string) error {
+	for _, ep := range eps {
+		if _, err := locator.Parse(ep); err != nil {
+			return fmt.Errorf("invalid endpoint %q: %w", ep, err)
+		}
+	}
+	return nil
 }
 
 // startMulticastEndpoint dials the given multicast group locator and
@@ -269,9 +290,11 @@ func (s *Session) runOutboundLoop(endpoint string) {
 			}
 		}
 		b = session.NewBackoff(s.backoff) // reset backoff after success
-		// Wait until the runtime tears down, then loop and re-dial.
+		// Wait until the runtime tears down, then loop and re-dial. The
+		// teardown watcher spawned in startRuntimeForPeer owns the actual
+		// uninstallRuntime call; this loop only observes Done() to know
+		// when to retry the dial.
 		<-rt.Done()
-		s.uninstallRuntime(rt)
 		select {
 		case <-closeCtx.Done():
 			return
@@ -344,6 +367,15 @@ func (s *Session) startRuntimeForPeer(link transport.Link, result *session.Hands
 	if err := s.replayToRuntime(rt); err != nil {
 		s.inner.Logger().Warn("peer-mode replay failed", "err", err)
 	}
+	// Watch for runtime teardown so accepted / scout-triggered runtimes
+	// (which have no surrounding loop to call uninstallRuntime) leave
+	// the registry when their Link drops. The outbound dial loop also
+	// relies on this; it observes rt.Done() separately to know when to
+	// re-dial, but the unregister itself is owned here.
+	s.peerWG.Go(func() {
+		<-rt.Done()
+		s.uninstallRuntime(rt)
+	})
 	return rt, nil
 }
 

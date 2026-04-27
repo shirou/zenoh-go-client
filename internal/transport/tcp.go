@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/shirou/zenoh-go-client/internal/codec"
 	"github.com/shirou/zenoh-go-client/internal/locator"
@@ -65,15 +66,22 @@ func (tcpListenerFactory) Listen(ctx context.Context, loc locator.Locator) (List
 	if err != nil {
 		return nil, fmt.Errorf("tcp listen %q: %w", loc.Address, err)
 	}
-	bound := loc
-	if a, ok := ln.Addr().(*net.TCPAddr); ok {
-		bound.Address = a.String()
+	tcpLn, ok := ln.(*net.TCPListener)
+	if !ok {
+		_ = ln.Close()
+		return nil, fmt.Errorf("tcp listen %q: returned %T, not *net.TCPListener", loc.Address, ln)
 	}
-	return &tcpListener{ln: ln, loc: bound}, nil
+	bound := loc
+	bound.Address = tcpLn.Addr().String()
+	return &tcpListener{ln: tcpLn, loc: bound}, nil
 }
 
+// tcpListener implements Listener over *net.TCPListener. ctx-aware Accept
+// is built on SetDeadline rather than closing the listener so a single
+// Listener can serve multiple Accept calls with different contexts —
+// only Close() is allowed to permanently stop the listener.
 type tcpListener struct {
-	ln  net.Listener
+	ln  *net.TCPListener
 	loc locator.Locator
 }
 
@@ -82,36 +90,43 @@ func (l *tcpListener) Scheme() locator.Scheme { return locator.SchemeTCP }
 func (l *tcpListener) Addr() locator.Locator { return l.loc }
 
 func (l *tcpListener) Accept(ctx context.Context) (Link, error) {
-	type result struct {
-		conn net.Conn
-		err  error
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	ch := make(chan result, 1)
+	// Clear any prior deadline left over from a previous ctx-cancelled
+	// Accept so this call blocks indefinitely until either the deadline
+	// helper below pokes it or a real connection arrives.
+	_ = l.ln.SetDeadline(time.Time{})
+
+	done := make(chan struct{})
+	defer close(done)
 	go func() {
-		c, err := l.ln.Accept()
-		ch <- result{c, err}
+		select {
+		case <-ctx.Done():
+			// Wake the blocked Accept by setting an immediately-elapsed
+			// deadline. The listener stays open for subsequent calls.
+			_ = l.ln.SetDeadline(time.Now())
+		case <-done:
+		}
 	}()
-	select {
-	case <-ctx.Done():
-		_ = l.ln.Close()
-		// Drain the in-flight accept so we don't leak the goroutine.
-		if r := <-ch; r.conn != nil {
-			_ = r.conn.Close()
+
+	c, err := l.ln.Accept()
+	if err != nil {
+		if errors.Is(err, net.ErrClosed) {
+			return nil, ErrListenerClosed
 		}
-		return nil, ctx.Err()
-	case r := <-ch:
-		if r.err != nil {
-			if errors.Is(r.err, net.ErrClosed) {
-				return nil, ErrListenerClosed
-			}
-			return nil, r.err
+		// Translate the SetDeadline-induced timeout back to ctx.Err()
+		// so callers see the original cancel cause, not a timeout error.
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
-		if tc, ok := r.conn.(*net.TCPConn); ok {
-			_ = tc.SetNoDelay(true)
-		}
-		remote := locator.Locator{Scheme: locator.SchemeTCP, Address: r.conn.RemoteAddr().String()}
-		return &tcpLink{conn: r.conn, loc: remote}, nil
+		return nil, err
 	}
+	if tc, ok := c.(*net.TCPConn); ok {
+		_ = tc.SetNoDelay(true)
+	}
+	remote := locator.Locator{Scheme: locator.SchemeTCP, Address: c.RemoteAddr().String()}
+	return &tcpLink{conn: c, loc: remote}, nil
 }
 
 func (l *tcpListener) Close() error {

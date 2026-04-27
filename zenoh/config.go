@@ -438,12 +438,18 @@ var scoutingHandlers = subtree{
 //     the entry keyed by the local SessionMode is selected.
 //
 // An empty array is a valid "match nothing" mask. Unknown keys in the
-// per-role object (e.g. typos) surface as errors.
+// per-role object (e.g. typos) surface as errors so config mistakes are
+// not silently dropped.
 func parseAutoconnect(localMode SessionMode, v any, p string) (What, error) {
 	switch t := v.(type) {
 	case []any:
 		return autoconnectFromArray(t, p)
 	case map[string]any:
+		for k := range t {
+			if k != "router" && k != "peer" && k != "client" {
+				return 0, fmt.Errorf("zenoh: %s/%s: unknown role key (want router/peer/client)", p, k)
+			}
+		}
 		key := localMode.String()
 		entry, ok := t[key]
 		if !ok {

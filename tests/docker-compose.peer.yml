@@ -1,0 +1,15 @@
+# Compose override for peer-mode interop. The Python container reaches
+# the Go peer running on the host via host.docker.internal:7461 (Linux
+# needs the explicit extra_hosts entry below; on Docker Desktop it is
+# resolved automatically).
+#
+# Usage:
+#   docker compose -f tests/docker-compose.yml -f tests/docker-compose.peer.yml up -d python
+#   ZENOH_PEER_INTEROP=1 go test -tags interop ./tests/interop/...
+services:
+  python:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      ZENOH_ENDPOINTS: "tcp/host.docker.internal:7461"
+      PYTHONUNBUFFERED: "1"

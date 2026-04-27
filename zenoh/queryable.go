@@ -156,11 +156,20 @@ func safeCall(f func()) {
 // sendDeclareQueryable builds the DECLARE[D_QUERYABLE] with the optional
 // QueryableInfo extension (complete flag, distance=0 for local).
 func (s *Session) sendDeclareQueryable(id uint32, keyExpr KeyExpr, opts *QueryableOptions) error {
+	return s.enqueueDeclare(buildDeclareQueryable(id, keyExpr, opts))
+}
+
+// sendDeclareQueryableOn is the per-Runtime variant for replay.
+func (s *Session) sendDeclareQueryableOn(rt *session.Runtime, id uint32, keyExpr KeyExpr, opts *QueryableOptions) error {
+	return s.enqueueDeclareOn(rt, buildDeclareQueryable(id, keyExpr, opts))
+}
+
+func buildDeclareQueryable(id uint32, keyExpr KeyExpr, opts *QueryableOptions) *wire.Declare {
 	body := wire.NewDeclareQueryable(id, keyExpr.toWire())
 	if opts != nil && opts.Complete {
 		body.Extensions = append(body.Extensions, queryableInfoExt(true, 0))
 	}
-	return s.enqueueDeclare(&wire.Declare{Body: body})
+	return &wire.Declare{Body: body}
 }
 
 // sendUndeclareQueryable emits U_QUERYABLE with the required WireExpr ext.

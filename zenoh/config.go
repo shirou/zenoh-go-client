@@ -11,9 +11,19 @@ import (
 // corresponding Rust `DEFAULT_CONFIG.json5` key paths so that values can be
 // populated programmatically or via NewConfigFromString / InsertJSON5.
 type Config struct {
+	// Mode selects the session role. Zero value (ModeClient) preserves
+	// pre-peer-mode behaviour. ModePeer enables incoming Listener
+	// acceptance and outbound peer discovery via Scout.
+	Mode SessionMode
+
 	// Endpoints is the ordered list of locator strings (e.g.
 	// "tcp/127.0.0.1:7447") to try when opening the session.
 	Endpoints []string
+
+	// ListenEndpoints, set in peer/router mode, is the ordered list of
+	// locator strings the session binds for incoming connections (e.g.
+	// "tcp/0.0.0.0:7447"). Ignored in client mode.
+	ListenEndpoints []string
 
 	// ZID is the local ZenohID (1..16 bytes hex). Empty means "generate a
 	// random 16-byte ID at Open time".
@@ -30,6 +40,56 @@ type Config struct {
 	// selects multicast-enabled scouting on 224.0.0.224:7446 with a 3s
 	// timeout, matching zenoh-rust defaults.
 	Scouting ScoutingConfig
+
+	// AutoconnectMask is the role bitmap consulted in peer mode when
+	// Scouting receives a HELLO: discovered peers whose WhatAmI matches
+	// the mask are auto-dialled. Zero value falls back to WhatDefault
+	// (router|peer) at session open time.
+	AutoconnectMask What
+}
+
+// SessionMode selects the local role advertised in INIT/OPEN handshakes
+// and JOIN messages.
+type SessionMode uint8
+
+const (
+	// ModeClient is the default. The session connects to one router or
+	// peer at a time and does not accept incoming connections.
+	ModeClient SessionMode = iota
+	// ModePeer accepts incoming connections, dials configured endpoints,
+	// and (when scouting is enabled) auto-connects to discovered peers.
+	ModePeer
+	// ModeRouter is reserved; the parser accepts the value but the
+	// runtime currently rejects it because routing logic is not
+	// implemented.
+	ModeRouter
+)
+
+// String implements fmt.Stringer for SessionMode.
+func (m SessionMode) String() string {
+	switch m {
+	case ModeClient:
+		return "client"
+	case ModePeer:
+		return "peer"
+	case ModeRouter:
+		return "router"
+	default:
+		return fmt.Sprintf("unknown(%d)", uint8(m))
+	}
+}
+
+// AsWhatAmI converts the local SessionMode to the WhatAmI value used in
+// INIT/OPEN/JOIN handshakes.
+func (m SessionMode) AsWhatAmI() WhatAmI {
+	switch m {
+	case ModePeer:
+		return WhatAmIPeer
+	case ModeRouter:
+		return WhatAmIRouter
+	default:
+		return WhatAmIClient
+	}
 }
 
 // MulticastMode selects whether Scout transmits to the multicast group.
@@ -104,6 +164,7 @@ const (
 	keyInterface            = "interface"
 	keyTTL                  = "ttl"
 	keyListen               = "listen"
+	keyAutoconnect          = "autoconnect"
 )
 
 // NewConfigFromString parses a JSON5 config document into a Config, using
@@ -176,8 +237,19 @@ func (c *Config) InsertJSON5(keyPath, jsonValue string) error {
 // InsertJSON5 follows the same walker but rejects unknown leaf keys because
 // callers addressing a specific path almost always mean to type a key we
 // know about; silently dropping their write would mask typos.
+//
+// `mode` is processed first so downstream handlers (currently autoconnect,
+// which selects a per-role array) can read the resolved local role.
 func applyConfig(c *Config, root map[string]any) error {
+	if v, ok := root[keyMode]; ok {
+		if err := applyKey(c, []string{keyMode}, v); err != nil {
+			return err
+		}
+	}
 	for k, v := range root {
+		if k == keyMode {
+			continue
+		}
 		if err := applyKey(c, []string{k}, v); err != nil && !isUnknownKey(err) {
 			return err
 		}
@@ -204,8 +276,15 @@ func applyKey(c *Config, path []string, v any) error {
 	switch path[0] {
 	case keyMode:
 		return leafString(path, v, joined, func(s string) error {
-			if s != "" && s != "client" {
-				return fmt.Errorf("zenoh: mode %q not supported (only \"client\")", s)
+			switch s {
+			case "", "client":
+				c.Mode = ModeClient
+			case "peer":
+				c.Mode = ModePeer
+			case "router":
+				c.Mode = ModeRouter
+			default:
+				return fmt.Errorf("zenoh: mode %q not supported", s)
 			}
 			return nil
 		})
@@ -213,6 +292,8 @@ func applyKey(c *Config, path []string, v any) error {
 		return leafString(path, v, joined, func(s string) error { c.ZID = s; return nil })
 	case keyConnect:
 		return walk(c, path, v, connectHandlers)
+	case keyListen:
+		return walk(c, path, v, listenHandlers)
 	case keyScouting:
 		return walk(c, path, v, scoutingHandlers)
 	default:
@@ -226,6 +307,17 @@ func applyKey(c *Config, path []string, v any) error {
 type leaf func(c *Config, v any, path string) error
 
 type subtree map[string]any // values are leaf or subtree
+
+var listenHandlers = subtree{
+	keyEndpoints: leaf(func(c *Config, v any, p string) error {
+		eps, err := asStringSlice(v, p)
+		if err != nil {
+			return err
+		}
+		c.ListenEndpoints = eps
+		return nil
+	}),
+}
 
 var connectHandlers = subtree{
 	keyEndpoints: leaf(func(c *Config, v any, p string) error {
@@ -326,7 +418,72 @@ var scoutingHandlers = subtree{
 			c.Scouting.MulticastListen = b
 			return nil
 		}),
+		keyAutoconnect: leaf(func(c *Config, v any, p string) error {
+			mask, err := parseAutoconnect(c.Mode, v, p)
+			if err != nil {
+				return err
+			}
+			c.AutoconnectMask = mask
+			return nil
+		}),
 	},
+}
+
+// parseAutoconnect coerces the autoconnect value into a What bitmask. Two
+// shapes are accepted:
+//
+//   - []string of role names ("router", "peer", "client") — applies to
+//     every local role.
+//   - {router: [...], peer: [...], client: [...]} — Rust per-role form;
+//     the entry keyed by the local SessionMode is selected.
+//
+// An empty array is a valid "match nothing" mask. Unknown keys in the
+// per-role object (e.g. typos) surface as errors so config mistakes are
+// not silently dropped.
+func parseAutoconnect(localMode SessionMode, v any, p string) (What, error) {
+	switch t := v.(type) {
+	case []any:
+		return autoconnectFromArray(t, p)
+	case map[string]any:
+		for k := range t {
+			if k != "router" && k != "peer" && k != "client" {
+				return 0, fmt.Errorf("zenoh: %s/%s: unknown role key (want router/peer/client)", p, k)
+			}
+		}
+		key := localMode.String()
+		entry, ok := t[key]
+		if !ok {
+			return 0, nil
+		}
+		arr, ok := entry.([]any)
+		if !ok {
+			return 0, fmt.Errorf("zenoh: %s/%s: expected array, got %T", p, key, entry)
+		}
+		return autoconnectFromArray(arr, p+"/"+key)
+	default:
+		return 0, fmt.Errorf("zenoh: %s: expected array or object, got %T", p, v)
+	}
+}
+
+func autoconnectFromArray(arr []any, p string) (What, error) {
+	var mask What
+	for i, e := range arr {
+		s, ok := e.(string)
+		if !ok {
+			return 0, fmt.Errorf("zenoh: %s[%d]: expected string, got %T", p, i, e)
+		}
+		switch s {
+		case "router":
+			mask |= WhatRouter
+		case "peer":
+			mask |= WhatPeer
+		case "client":
+			mask |= WhatClient
+		default:
+			return 0, fmt.Errorf("zenoh: %s[%d]: unknown role %q", p, i, s)
+		}
+	}
+	return mask, nil
 }
 
 // walk descends one step into the tree pointed at by path[0]. For a subtree

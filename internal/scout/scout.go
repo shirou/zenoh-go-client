@@ -21,11 +21,9 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/net/ipv4"
-	"golang.org/x/net/ipv6"
-
 	"github.com/shirou/zenoh-go-client/internal/codec"
 	"github.com/shirou/zenoh-go-client/internal/locator"
+	"github.com/shirou/zenoh-go-client/internal/multicast"
 	"github.com/shirou/zenoh-go-client/internal/wire"
 )
 
@@ -125,26 +123,36 @@ func Run(ctx context.Context, opts Options, deliver func(Hello)) error {
 		matcher = wire.MatcherAny
 	}
 
-	plan, err := planSockets(opts)
+	plan := multicast.Plan{
+		Group:        scoutMulticastAddress(opts.MulticastAddress),
+		Interface:    opts.MulticastInterface,
+		TTL:          opts.MulticastTTL,
+		EnableSend:   opts.MulticastEnabled,
+		EnableListen: opts.MulticastListen,
+		Unicast:      opts.UnicastAddresses,
+	}
+	if !opts.MulticastEnabled && !opts.MulticastListen {
+		// Disable the multicast group entirely for unicast-only scouting.
+		plan.Group = ""
+	}
+	sockets, err := multicast.Open(plan)
 	if err != nil {
 		return err
 	}
-	hasSend := len(plan.targetsV4)+len(plan.targetsV6) > 0
-	hasListen := opts.MulticastListen && (plan.mcastV4 != nil || plan.mcastV6 != nil)
+	hasSend := len(sockets.TargetsV4)+len(sockets.TargetsV6) > 0
+	hasListen := opts.MulticastListen && (sockets.McastV4 != nil || sockets.McastV6 != nil)
 	if !hasSend && !hasListen {
+		sockets.CloseAll()
 		return errors.New("scout: no multicast/unicast targets and no multicast listener configured")
 	}
 
 	body, err := encodeScout(opts.ZID, matcher)
 	if err != nil {
+		sockets.CloseAll()
 		return fmt.Errorf("scout: encode SCOUT: %w", err)
 	}
 
-	sockets, err := openSockets(plan, opts)
-	if err != nil {
-		return err
-	}
-	defer sockets.closeAll()
+	defer sockets.CloseAll()
 
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -157,181 +165,33 @@ func Run(ctx context.Context, opts Options, deliver func(Hello)) error {
 	dispatcher := newDispatcher(opts.ZID, deliver)
 
 	var wg sync.WaitGroup
-	if sockets.sendV4 != nil {
-		wg.Go(func() { sendLoop(runCtx, sockets.sendV4, body, plan.targetsV4, interval) })
+	if sockets.SendV4 != nil {
+		targets := sockets.TargetsV4
+		wg.Go(func() { sendLoop(runCtx, sockets.SendV4, body, targets, interval) })
 	}
-	if sockets.sendV6 != nil {
-		wg.Go(func() { sendLoop(runCtx, sockets.sendV6, body, plan.targetsV6, interval) })
+	if sockets.SendV6 != nil {
+		targets := sockets.TargetsV6
+		wg.Go(func() { sendLoop(runCtx, sockets.SendV6, body, targets, interval) })
 	}
-	for _, c := range sockets.conns() {
+	for _, c := range sockets.Conns() {
 		wg.Go(func() { readLoop(c, dispatcher) })
 	}
 	wg.Go(func() {
 		<-runCtx.Done()
-		sockets.unblockReaders()
+		sockets.UnblockReaders()
 	})
 
 	wg.Wait()
 	return nil
 }
 
-type socketPlan struct {
-	targetsV4 []*net.UDPAddr
-	targetsV6 []*net.UDPAddr
-	mcastV4   *net.UDPAddr // non-nil when a v4 multicast group is in play (send or listen)
-	mcastV6   *net.UDPAddr
-}
-
-func planSockets(opts Options) (*socketPlan, error) {
-	p := &socketPlan{}
-	// A multicast address is resolved if we'll either send to it or listen
-	// on the group. MulticastListen without MulticastEnabled yields a
-	// passive observer — no SCOUT is transmitted, but multicast HELLO
-	// advertisements still reach the read loop.
-	if opts.MulticastEnabled || opts.MulticastListen {
-		addr := opts.MulticastAddress
-		if addr == "" {
-			addr = DefaultMulticastAddressV4
-		}
-		u, err := net.ResolveUDPAddr("udp", addr)
-		if err != nil {
-			return nil, fmt.Errorf("scout: resolve multicast %q: %w", addr, err)
-		}
-		if u.IP.To4() != nil {
-			p.mcastV4 = u
-			if opts.MulticastEnabled {
-				p.targetsV4 = append(p.targetsV4, u)
-			}
-		} else {
-			p.mcastV6 = u
-			if opts.MulticastEnabled {
-				p.targetsV6 = append(p.targetsV6, u)
-			}
-		}
+// scoutMulticastAddress returns the configured multicast group address
+// for SCOUT, falling back to DefaultMulticastAddressV4 when empty.
+func scoutMulticastAddress(addr string) string {
+	if addr == "" {
+		return DefaultMulticastAddressV4
 	}
-	for _, s := range opts.UnicastAddresses {
-		u, err := net.ResolveUDPAddr("udp", s)
-		if err != nil {
-			return nil, fmt.Errorf("scout: resolve unicast %q: %w", s, err)
-		}
-		if u.IP.To4() != nil {
-			p.targetsV4 = append(p.targetsV4, u)
-		} else {
-			p.targetsV6 = append(p.targetsV6, u)
-		}
-	}
-	return p, nil
-}
-
-type openedSockets struct {
-	sendV4   *net.UDPConn
-	sendV6   *net.UDPConn
-	listenV4 *net.UDPConn
-	listenV6 *net.UDPConn
-}
-
-func (s *openedSockets) conns() []*net.UDPConn {
-	out := make([]*net.UDPConn, 0, 4)
-	for _, c := range []*net.UDPConn{s.sendV4, s.sendV6, s.listenV4, s.listenV6} {
-		if c != nil {
-			out = append(out, c)
-		}
-	}
-	return out
-}
-
-func (s *openedSockets) closeAll() {
-	for _, c := range s.conns() {
-		_ = c.Close()
-	}
-}
-
-// unblockReaders nudges every read loop out of ReadFromUDP by setting an
-// already-elapsed deadline. Readers treat the resulting timeout as a clean
-// shutdown signal, so this runs before closeAll to avoid racing a close
-// with an in-flight Read.
-func (s *openedSockets) unblockReaders() {
-	now := time.Now()
-	for _, c := range s.conns() {
-		_ = c.SetReadDeadline(now)
-	}
-}
-
-func openSockets(plan *socketPlan, opts Options) (*openedSockets, error) {
-	out := &openedSockets{}
-	var err error
-	defer func() {
-		if err != nil {
-			out.closeAll()
-		}
-	}()
-
-	if len(plan.targetsV4) > 0 {
-		out.sendV4, err = net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
-		if err != nil {
-			return nil, fmt.Errorf("scout: listen udp4: %w", err)
-		}
-		if err = applyMulticastOpts(out.sendV4, false, opts); err != nil {
-			return nil, err
-		}
-	}
-	if len(plan.targetsV6) > 0 {
-		out.sendV6, err = net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6unspecified, Port: 0})
-		if err != nil {
-			return nil, fmt.Errorf("scout: listen udp6: %w", err)
-		}
-		if err = applyMulticastOpts(out.sendV6, true, opts); err != nil {
-			return nil, err
-		}
-	}
-	if opts.MulticastListen && plan.mcastV4 != nil {
-		out.listenV4, err = net.ListenMulticastUDP("udp4", opts.MulticastInterface, plan.mcastV4)
-		if err != nil {
-			return nil, fmt.Errorf("scout: listen multicast v4: %w", err)
-		}
-	}
-	if opts.MulticastListen && plan.mcastV6 != nil {
-		out.listenV6, err = net.ListenMulticastUDP("udp6", opts.MulticastInterface, plan.mcastV6)
-		if err != nil {
-			return nil, fmt.Errorf("scout: listen multicast v6: %w", err)
-		}
-	}
-	return out, nil
-}
-
-// applyMulticastOpts applies TTL / outgoing-interface overrides to a send
-// socket. IPv4 and IPv6 use separate x/net PacketConn types that share the
-// same method shape, so one helper covers both.
-func applyMulticastOpts(c *net.UDPConn, isV6 bool, opts Options) error {
-	if opts.MulticastTTL == 0 && opts.MulticastInterface == nil {
-		return nil
-	}
-	if isV6 {
-		p := ipv6.NewPacketConn(c)
-		if opts.MulticastTTL > 0 {
-			if err := p.SetMulticastHopLimit(opts.MulticastTTL); err != nil {
-				return fmt.Errorf("scout: set v6 multicast hop limit: %w", err)
-			}
-		}
-		if opts.MulticastInterface != nil {
-			if err := p.SetMulticastInterface(opts.MulticastInterface); err != nil {
-				return fmt.Errorf("scout: set v6 multicast interface: %w", err)
-			}
-		}
-		return nil
-	}
-	p := ipv4.NewPacketConn(c)
-	if opts.MulticastTTL > 0 {
-		if err := p.SetMulticastTTL(opts.MulticastTTL); err != nil {
-			return fmt.Errorf("scout: set v4 multicast TTL: %w", err)
-		}
-	}
-	if opts.MulticastInterface != nil {
-		if err := p.SetMulticastInterface(opts.MulticastInterface); err != nil {
-			return fmt.Errorf("scout: set v4 multicast interface: %w", err)
-		}
-	}
-	return nil
+	return addr
 }
 
 func sendLoop(ctx context.Context, conn *net.UDPConn, body []byte, targets []*net.UDPAddr, interval time.Duration) {

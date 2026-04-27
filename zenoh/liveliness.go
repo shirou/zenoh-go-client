@@ -79,9 +79,16 @@ func (t *LivelinessToken) Drop() {
 }
 
 func (s *Session) sendDeclareToken(id uint32, keyExpr KeyExpr) error {
-	return s.enqueueDeclare(&wire.Declare{
-		Body: wire.NewDeclareToken(id, keyExpr.toWire()),
-	})
+	return s.enqueueDeclare(buildDeclareToken(id, keyExpr))
+}
+
+// sendDeclareTokenOn is the per-Runtime variant for replay.
+func (s *Session) sendDeclareTokenOn(rt *session.Runtime, id uint32, keyExpr KeyExpr) error {
+	return s.enqueueDeclareOn(rt, buildDeclareToken(id, keyExpr))
+}
+
+func buildDeclareToken(id uint32, keyExpr KeyExpr) *wire.Declare {
+	return &wire.Declare{Body: wire.NewDeclareToken(id, keyExpr.toWire())}
 }
 
 func (s *Session) sendUndeclareToken(id uint32, keyExpr KeyExpr) error {
@@ -188,17 +195,26 @@ func (l *LivelinessSubscriber) Drop() {
 // sendLivelinessSubscriberInterest emits INTEREST[Mode=CurrentFuture|Future,
 // Filter=KeyExprs+Tokens, restricted=ke].
 func (s *Session) sendLivelinessSubscriberInterest(id uint32, ke KeyExpr, history bool) error {
+	return s.enqueueControl(buildLivelinessSubscriberInterest(id, ke, history))
+}
+
+// sendLivelinessSubscriberInterestOn is the per-Runtime variant for replay.
+func (s *Session) sendLivelinessSubscriberInterestOn(rt *session.Runtime, id uint32, ke KeyExpr, history bool) error {
+	return s.enqueueControlOn(rt, buildLivelinessSubscriberInterest(id, ke, history))
+}
+
+func buildLivelinessSubscriberInterest(id uint32, ke KeyExpr, history bool) *wire.Interest {
 	mode := wire.InterestModeFuture
 	if history {
 		mode = wire.InterestModeCurrentFuture
 	}
 	wexpr := ke.toWire()
-	return s.enqueueControl(&wire.Interest{
+	return &wire.Interest{
 		InterestID: id,
 		Mode:       mode,
 		Filter:     wire.InterestFilter{KeyExprs: true, Tokens: true},
 		KeyExpr:    &wexpr,
-	})
+	}
 }
 
 // livelinessEventToSample turns an internal event into a public Sample.

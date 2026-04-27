@@ -88,19 +88,59 @@ func (s *Session) enqueuePush(ctx context.Context, keyExpr KeyExpr, body wire.Pu
 // lane, reliable, non-express. Always uses a background ctx because
 // declare / tear-down / INTEREST sends must not be abandoned mid-wire;
 // cancellation is via Session.Close (propagated through LinkClosed).
+//
+// In peer mode the message is broadcast to every live Runtime so all
+// connected peers see the declaration; in client mode there is exactly
+// one Runtime and the behaviour matches the pre-peer-mode hot path.
 func (s *Session) enqueueControl(msg codec.Encoder) error {
 	return s.enqueueNetwork(context.Background(), msg, wire.QoSPriorityControl, true, false)
 }
 
+// enqueueControlOn is the per-Runtime variant of enqueueControl, used by
+// the reconnect-replay path so only the freshly-installed Link receives
+// the catch-up declarations.
+func (s *Session) enqueueControlOn(rt *session.Runtime, msg codec.Encoder) error {
+	return s.enqueueNetworkOn(rt, context.Background(), msg, wire.QoSPriorityControl, true, false)
+}
+
 // enqueueNetwork encodes msg, wraps it in an OutboundMessage with the
-// given routing metadata, and sends it on the current runtime's writer
-// channel. Returns ErrSessionNotReady when the session is between
-// Runtimes (reconnect in progress), ErrConnectionLost when the link
-// drops mid-send, and ctx.Err() when ctx fires first.
+// given routing metadata, and broadcasts it to every live Runtime.
+// Returns ErrSessionNotReady when no Runtime is live (client mode in
+// reconnect, peer mode with no peers yet), ErrConnectionLost when every
+// targeted Link dropped mid-send, and ctx.Err() when ctx fires first.
 //
 // Common backbone for Put, Declare, and any other network-layer emission.
-func (s *Session) enqueueNetwork(ctx context.Context, msg codec.Encoder, prio wire.QoSPriority, reliable, express bool) (err error) {
-	rt := s.snapshotRuntime()
+func (s *Session) enqueueNetwork(ctx context.Context, msg codec.Encoder, prio wire.QoSPriority, reliable, express bool) error {
+	runtimes := s.snapshotAllRuntimes()
+	if len(runtimes) == 0 {
+		return ErrSessionNotReady
+	}
+	encoded, err := transport.EncodeNetworkMessage(msg)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	delivered := 0
+	for _, rt := range runtimes {
+		if err := s.deliverEncoded(rt, ctx, encoded, prio, reliable, express); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		delivered++
+	}
+	// Only surface an error when every runtime failed; partial delivery is
+	// expected in peer mode (one peer dropped while others remain live).
+	if delivered == 0 {
+		return firstErr
+	}
+	return nil
+}
+
+// enqueueNetworkOn sends msg to a specific Runtime. Used by the reconnect
+// replay path and peer-mode "new link came up, catch this peer up".
+func (s *Session) enqueueNetworkOn(rt *session.Runtime, ctx context.Context, msg codec.Encoder, prio wire.QoSPriority, reliable, express bool) error {
 	if rt == nil {
 		return ErrSessionNotReady
 	}
@@ -108,6 +148,12 @@ func (s *Session) enqueueNetwork(ctx context.Context, msg codec.Encoder, prio wi
 	if err != nil {
 		return err
 	}
+	return s.deliverEncoded(rt, ctx, encoded, prio, reliable, express)
+}
+
+// deliverEncoded performs the actual OutQ send. Encoded is shared across
+// every runtime in a broadcast — the batcher reads but does not mutate it.
+func (s *Session) deliverEncoded(rt *session.Runtime, ctx context.Context, encoded []byte, prio wire.QoSPriority, reliable, express bool) (err error) {
 	// The orchestrator never closes OutQ — shutdown is signalled solely
 	// through LinkClosed — so the select below cannot panic on send-to-
 	// closed. The recover stays as a narrow safety net in case a future

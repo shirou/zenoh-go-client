@@ -50,6 +50,15 @@ func (rt *Runtime) LinkLocalAddress() string { return rt.link.LocalAddress() }
 // LinkRemoteLocator returns the locator the link is connected to.
 func (rt *Runtime) LinkRemoteLocator() locator.Locator { return rt.link.RemoteLocator() }
 
+// PeerZIDBytes returns the remote peer's ZenohID bytes, for use as a key
+// in the Session.runtimes registry.
+func (rt *Runtime) PeerZIDBytes() []byte {
+	if rt.Result == nil {
+		return nil
+	}
+	return rt.Result.PeerZID.Bytes
+}
+
 // Shutdown initiates orderly teardown of this runtime. Idempotent and safe
 // to call concurrently. Returns immediately; wait on Done() for completion.
 func (rt *Runtime) Shutdown() {
@@ -69,7 +78,18 @@ func (rt *Runtime) Done() <-chan struct{} { return rt.done }
 // followed by an EnterReconnecting call). It is a no-op for a state that
 // is already Handshaking so that retries of the same handshake attempt are
 // idempotent.
+//
+// In multi-runtime (peer) mode the single-runtime FSM does not apply —
+// concurrent handshakes against unrelated peers are valid and must not
+// fail just because an earlier one already drove the state to Active.
+// The only refusal is StateClosed.
 func (s *Session) BeginHandshake() error {
+	if s.multiRuntime {
+		if s.state.Load() == StateClosed {
+			return fmt.Errorf("session: cannot handshake from state Closed")
+		}
+		return nil
+	}
 	for {
 		old := s.state.Load()
 		switch old {
@@ -104,8 +124,30 @@ func (s *Session) EnterReconnecting() error {
 // those goroutines have exited. Run may be called multiple times on the
 // same Session (for reconnect) — each invocation requires Handshaking
 // state and produces an independent Runtime.
+//
+// In multi-runtime (peer) mode the Handshaking→Active CAS is replaced
+// with a permissive "not Closed" check so two concurrent handshakes
+// against different peers can both produce Runtimes — the canonical-link
+// tiebreak in the calling layer resolves duplicates without forcing one
+// of them to drop its Link mid-flight (which would mutually destroy
+// both directions).
 func (s *Session) Run(cfg RunConfig) (*Runtime, error) {
-	if !s.state.CAS(StateHandshaking, StateActive) {
+	if s.multiRuntime {
+		// Bump to Active without clobbering a concurrent Close that
+		// raced past our Closed check. CAS-loop because the source state
+		// can be Init (first ever Run on this Session), Handshaking
+		// (only one peer ever called BeginHandshake), or Active (the
+		// common steady-state once any peer is up).
+		for {
+			cur := s.state.Load()
+			if cur == StateClosed {
+				return nil, fmt.Errorf("session: cannot Run from state Closed")
+			}
+			if cur == StateActive || s.state.CAS(cur, StateActive) {
+				break
+			}
+		}
+	} else if !s.state.CAS(StateHandshaking, StateActive) {
 		return nil, fmt.Errorf("session: cannot Run from state %s", s.state.Load())
 	}
 

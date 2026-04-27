@@ -109,6 +109,19 @@ func (s *Session) enqueueDeclare(msg *wire.Declare) error {
 	return s.enqueueControl(msg)
 }
 
+// sendDeclareSubscriberOn is the per-Runtime variant used by the reconnect
+// replay path so the freshly-installed Link receives D_SUBSCRIBER for
+// every existing local subscriber.
+func (s *Session) sendDeclareSubscriberOn(rt *session.Runtime, id uint32, keyExpr KeyExpr) error {
+	return s.enqueueDeclareOn(rt, &wire.Declare{
+		Body: wire.NewDeclareSubscriber(id, keyExpr.toWire()),
+	})
+}
+
+func (s *Session) enqueueDeclareOn(rt *session.Runtime, msg *wire.Declare) error {
+	return s.enqueueControlOn(rt, msg)
+}
+
 // buildSample converts an internal PushSample to a public Sample. The
 // internal PushSample.Payload may alias the reader buffer, so we copy.
 // ParsedKeyExpr is reused directly to avoid re-parsing a string the

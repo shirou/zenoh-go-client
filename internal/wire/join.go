@@ -64,6 +64,67 @@ func (m *Join) EncodeTo(w *codec.Writer) error {
 	return nil
 }
 
+// LaneSNs carries the per-priority initial sequence numbers a multicast
+// peer advertises in its JOIN. Index = QoSPriority (0..7); the slice
+// pair is [reliable, best_effort]. Wire layout in the QoS extension is
+// the 16 z64s concatenated in priority-major, reliability-minor order:
+// [Rel[0], BE[0], Rel[1], BE[1], ..., Rel[7], BE[7]].
+type LaneSNs struct {
+	Reliable   [8]uint64
+	BestEffort [8]uint64
+}
+
+// AttachLaneSNs appends the per-lane SN extension (QoS ext, ID=0x01,
+// M=true, ZBuf body) to j.Extensions. Existing QoS extensions are left
+// alone — the caller is responsible for ensuring it doesn't duplicate.
+func (j *Join) AttachLaneSNs(sns LaneSNs) error {
+	w := codec.NewWriter(16 * 9) // 16 z64s, ≤ 9 bytes each
+	for i := range 8 {
+		w.EncodeZ64(sns.Reliable[i])
+		w.EncodeZ64(sns.BestEffort[i])
+	}
+	body := w.Bytes()
+	j.Extensions = append(j.Extensions, codec.Extension{
+		Header: codec.ExtHeader{
+			ID:        ExtIDQoS,
+			Encoding:  codec.ExtEncZBuf,
+			Mandatory: true,
+		},
+		ZBuf: body,
+	})
+	return nil
+}
+
+// DecodeLaneSNs extracts per-lane SNs from j.Extensions. Returns
+// (nil, false, nil) when no QoS-ZBuf extension is present so callers
+// can fall back to the aggregate NextSNRel/NextSNBE fields.
+func (j *Join) DecodeLaneSNs() (*LaneSNs, bool, error) {
+	for _, ext := range j.Extensions {
+		if ext.Header.ID != ExtIDQoS || ext.Header.Encoding != codec.ExtEncZBuf {
+			continue
+		}
+		r := codec.NewReader(ext.ZBuf)
+		var sns LaneSNs
+		for i := range 8 {
+			v, err := r.DecodeZ64()
+			if err != nil {
+				return nil, false, fmt.Errorf("JOIN lane SN[%d].reliable: %w", i, err)
+			}
+			sns.Reliable[i] = v
+			v, err = r.DecodeZ64()
+			if err != nil {
+				return nil, false, fmt.Errorf("JOIN lane SN[%d].best_effort: %w", i, err)
+			}
+			sns.BestEffort[i] = v
+		}
+		if r.Len() != 0 {
+			return nil, false, fmt.Errorf("JOIN lane SN extension has %d trailing bytes", r.Len())
+		}
+		return &sns, true, nil
+	}
+	return nil, false, nil
+}
+
 func DecodeJoin(r *codec.Reader, h codec.Header) (*Join, error) {
 	if h.ID != IDTransportJoin {
 		return nil, fmt.Errorf("wire: expected JOIN header, got id=%#x", h.ID)

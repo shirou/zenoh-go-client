@@ -120,13 +120,22 @@ func (p *Publisher) mergeOptions(perCall *PublisherOptions) *PutOptions {
 // Filter.KeyExprs is set so the router is free to alias the keyExpr
 // before sending matching D_SUBSCRIBER back.
 func (s *Session) sendPublisherInterest(id uint32, ke KeyExpr) error {
+	return s.enqueueControl(buildPublisherInterest(id, ke))
+}
+
+// sendPublisherInterestOn is the per-Runtime variant for replay.
+func (s *Session) sendPublisherInterestOn(rt *session.Runtime, id uint32, ke KeyExpr) error {
+	return s.enqueueControlOn(rt, buildPublisherInterest(id, ke))
+}
+
+func buildPublisherInterest(id uint32, ke KeyExpr) *wire.Interest {
 	wexpr := ke.toWire()
-	return s.enqueueControl(&wire.Interest{
+	return &wire.Interest{
 		InterestID: id,
 		Mode:       wire.InterestModeCurrentFuture,
 		Filter:     wire.InterestFilter{KeyExprs: true, Subscribers: true},
 		KeyExpr:    &wexpr,
-	})
+	}
 }
 
 // publisherState is the replay-side view of a live Publisher. Kept in

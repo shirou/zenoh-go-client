@@ -9,6 +9,23 @@ import (
 	"github.com/shirou/zenoh-go-client/internal/transport"
 )
 
+// DialOne dials a single endpoint and returns the resulting Link.
+func DialOne(ctx context.Context, endpoint string) (transport.Link, error) {
+	loc, err := locator.Parse(endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("parse %q: %w", endpoint, err)
+	}
+	d := transport.DialerFor(loc.Scheme)
+	if d == nil {
+		return nil, fmt.Errorf("no dialer for scheme %q", loc.Scheme)
+	}
+	link, err := d.Dial(ctx, loc)
+	if err != nil {
+		return nil, fmt.Errorf("dial %s: %w", endpoint, err)
+	}
+	return link, nil
+}
+
 // DialFirst iterates endpoints in order and returns the first successfully
 // connected Link. Errors from every endpoint are joined so the caller can
 // see which ones failed.

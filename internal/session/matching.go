@@ -73,6 +73,14 @@ type matchingListener struct {
 // matchingRegistry is the session-wide matching state. Keyed by
 // interest_id. A single mutex serialises inbound declare events and
 // listener attach/detach so deliveries observe a consistent snapshot.
+//
+// Peer mode caveat: the counter aggregates D_SUBSCRIBER / D_QUERYABLE
+// from every connected peer, which is correct in steady state and on
+// graceful U_SUBSCRIBER / U_QUERYABLE undeclares. If a peer drops
+// abruptly without sending undeclares the counter stays inflated; a
+// follow-up that threads source-peer ZenohID through the dispatcher and
+// switches to a per-peer counter map is needed for fully-correct cross-
+// link tracking.
 type matchingRegistry struct {
 	mu   sync.Mutex
 	byID map[uint32]*matchingEntry

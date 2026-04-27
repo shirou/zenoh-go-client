@@ -57,6 +57,7 @@ func fixtureCases() []fixtureCase {
 			file: "rust_compatible.json5",
 			want: Config{
 				Endpoints:        []string{"tcp/127.0.0.1:7447"},
+				ListenEndpoints:  []string{}, // listen.endpoints: [] in the fixture
 				ReconnectInitial: time.Second,
 				ReconnectMax:     4 * time.Second,
 				ReconnectFactor:  2.0,
@@ -70,6 +71,7 @@ func fixtureCases() []fixtureCase {
 					MulticastListen: false,
 					Timeout:         3 * time.Second,
 				},
+				// mode=client, autoconnect has no "client" key → 0
 			},
 		},
 		{
@@ -87,6 +89,19 @@ func fixtureCases() []fixtureCase {
 			name: "comments_only",
 			file: "comments_only.json5",
 			want: Config{},
+		},
+		{
+			name: "peer",
+			file: "peer.json5",
+			want: Config{
+				Mode:            ModePeer,
+				Endpoints:       []string{"tcp/192.0.2.10:7447"},
+				ListenEndpoints: []string{"tcp/0.0.0.0:7447"},
+				Scouting: ScoutingConfig{
+					MulticastMode: MulticastAuto,
+				},
+				AutoconnectMask: WhatPeer | WhatRouter,
+			},
 		},
 		{
 			name: "json5_features",

@@ -47,6 +47,18 @@ type Session struct {
 
 	matchingOnce sync.Once
 	matching     *matchingRegistry
+
+	// runtimes tracks every live Runtime, keyed by the peer's ZenohID.
+	// In client mode this holds at most one entry; peer mode holds one
+	// entry per established remote peer. The hot path (Put/Declare) goes
+	// through ForEachRuntime which read-locks once.
+	runtimesMu sync.RWMutex
+	runtimes   map[string]*Runtime
+
+	// multiRuntime relaxes the single-runtime state machine so peer mode
+	// can drive multiple parallel handshakes against different peers
+	// without one runtime's Active state blocking the next handshake.
+	multiRuntime bool
 }
 
 // Option configures a Session at construction time.
@@ -61,6 +73,15 @@ func WithLogger(logger *slog.Logger) Option {
 	}
 }
 
+// WithMultiRuntime marks the session as hosting multiple parallel
+// runtimes (peer mode). The single-runtime state-machine guards in
+// BeginHandshake and Run are relaxed so concurrent handshakes against
+// different peers do not race each other for the Handshaking→Active
+// transition.
+func WithMultiRuntime() Option {
+	return func(s *Session) { s.multiRuntime = true }
+}
+
 // New constructs a Session in the Init state. It does not start any
 // goroutines or perform any I/O; call BeginHandshake then Run to attach a
 // live link.
@@ -68,12 +89,86 @@ func New(opts ...Option) *Session {
 	s := &Session{
 		userClose: make(chan struct{}),
 		logger:    slog.Default(),
+		runtimes:  make(map[string]*Runtime),
 	}
 	s.state.Store(StateInit)
 	for _, opt := range opts {
 		opt(s)
 	}
 	return s
+}
+
+// RegisterRuntime stores rt under the given peer ZenohID. It overwrites
+// any existing entry — callers that need to detect duplicates must use
+// RuntimeFor first.
+func (s *Session) RegisterRuntime(peerZID []byte, rt *Runtime) {
+	if rt == nil {
+		return
+	}
+	s.runtimesMu.Lock()
+	defer s.runtimesMu.Unlock()
+	s.runtimes[string(peerZID)] = rt
+}
+
+// UnregisterRuntime removes the entry for peerZID if rt matches. The
+// matched-rt check protects against unregistering a freshly-installed
+// successor when an old Runtime's teardown observer fires after the
+// replacement has already been registered.
+func (s *Session) UnregisterRuntime(peerZID []byte, rt *Runtime) {
+	s.runtimesMu.Lock()
+	defer s.runtimesMu.Unlock()
+	if cur, ok := s.runtimes[string(peerZID)]; ok && (rt == nil || cur == rt) {
+		delete(s.runtimes, string(peerZID))
+	}
+}
+
+// RuntimeFor returns the Runtime registered for the given peer ZenohID,
+// or nil if none is live.
+func (s *Session) RuntimeFor(peerZID []byte) *Runtime {
+	s.runtimesMu.RLock()
+	defer s.runtimesMu.RUnlock()
+	return s.runtimes[string(peerZID)]
+}
+
+// ForEachRuntime invokes fn for every live Runtime. The read lock is held
+// for the duration so fn must not block on any operation that registers or
+// unregisters runtimes (e.g. Run/Shutdown). Snapshot first if the caller
+// needs to do blocking I/O.
+func (s *Session) ForEachRuntime(fn func(peerZID []byte, rt *Runtime)) {
+	s.runtimesMu.RLock()
+	defer s.runtimesMu.RUnlock()
+	for k, rt := range s.runtimes {
+		fn([]byte(k), rt)
+	}
+}
+
+// SnapshotRuntimes returns a copy of the current runtime set. Use when
+// the caller needs to perform blocking work per-runtime without holding
+// the registry lock.
+func (s *Session) SnapshotRuntimes() []*Runtime {
+	s.runtimesMu.RLock()
+	defer s.runtimesMu.RUnlock()
+	if len(s.runtimes) == 0 {
+		return nil
+	}
+	out := make([]*Runtime, 0, len(s.runtimes))
+	for _, rt := range s.runtimes {
+		out = append(out, rt)
+	}
+	return out
+}
+
+// AnyRuntime returns one currently-live Runtime, or nil if none. For
+// client-mode hot paths that only need "the" runtime; in peer mode the
+// choice between multiple runtimes is non-deterministic — callers that
+// care use ForEachRuntime instead.
+func (s *Session) AnyRuntime() *Runtime {
+	s.runtimesMu.RLock()
+	defer s.runtimesMu.RUnlock()
+	for _, rt := range s.runtimes {
+		return rt
+	}
+	return nil
 }
 
 // State returns the current lifecycle state.

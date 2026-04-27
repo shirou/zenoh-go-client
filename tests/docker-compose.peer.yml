@@ -1,0 +1,15 @@
+# Compose override for peer-mode interop. Adds host.docker.internal
+# routing so the Python container can reach the Go peer running on the
+# host at ZENOH_PEER_ENDPOINT. Critically this override does NOT touch
+# ZENOH_ENDPOINTS — the router-based interop scripts continue to point
+# at the zenohd service unchanged.
+#
+# Usage:
+#   docker compose -f tests/docker-compose.yml -f tests/docker-compose.peer.yml up -d python
+#   ZENOH_PEER_INTEROP=1 go test -tags interop ./tests/interop/...
+services:
+  python:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      ZENOH_PEER_ENDPOINT: "tcp/host.docker.internal:7461"

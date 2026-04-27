@@ -127,7 +127,10 @@ for hello := range ch {
 ```
 
 Runnable variants live under [`examples/`](examples/):
-`z_pub`, `z_sub`, `z_get`, `z_queryable`, `z_liveliness`.
+`z_pub`, `z_sub`, `z_get`, `z_queryable`, `z_liveliness`, `z_put`,
+`z_delete`, `z_info`, `z_scout`, `z_pull`, `z_querier`, `z_storage`,
+`z_get_liveliness`, `z_sub_liveliness`, `z_ping`, `z_pong`, `z_pub_thr`,
+`z_sub_thr`.
 
 ## Implemented features
 
@@ -390,7 +393,6 @@ Not yet implemented, in rough priority order:
   forwarding through the group, per-peer reassembly, and FRAME seq-num
   monotonicity checks are deferred follow-ups
 - **Patch ≥ 1 wire features** (`BlockFirst`, FRAGMENT First/Drop markers)
-- Port the remaining upstream examples (`z_pub_thr`, `z_ping`, `z_pong`, …)
 - Benchmark suite
 - expvar / Prometheus metrics hooks
 - Router-side entity-level ACL support

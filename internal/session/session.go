@@ -54,6 +54,11 @@ type Session struct {
 	// through ForEachRuntime which read-locks once.
 	runtimesMu sync.RWMutex
 	runtimes   map[string]*Runtime
+
+	// multiRuntime relaxes the single-runtime state machine so peer mode
+	// can drive multiple parallel handshakes against different peers
+	// without one runtime's Active state blocking the next handshake.
+	multiRuntime bool
 }
 
 // Option configures a Session at construction time.
@@ -66,6 +71,15 @@ func WithLogger(logger *slog.Logger) Option {
 			s.logger = logger
 		}
 	}
+}
+
+// WithMultiRuntime marks the session as hosting multiple parallel
+// runtimes (peer mode). The single-runtime state-machine guards in
+// BeginHandshake and Run are relaxed so concurrent handshakes against
+// different peers do not race each other for the Handshaking→Active
+// transition.
+func WithMultiRuntime() Option {
+	return func(s *Session) { s.multiRuntime = true }
 }
 
 // New constructs a Session in the Init state. It does not start any

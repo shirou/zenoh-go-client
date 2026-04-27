@@ -338,6 +338,29 @@ func (s *Session) dialOneAndRun(ctx context.Context, endpoint string) (*session.
 // lexicographically-smaller ZID — both sides reach the same decision
 // because each evaluates the same predicate on the same pair.
 func (s *Session) startRuntimeForPeer(link transport.Link, result *session.HandshakeResult, isInitiator bool) (*session.Runtime, error) {
+	myZID := s.zid.ToWireID().Bytes
+	peerZID := result.PeerZID.Bytes
+
+	// Serialise the canonical-link decision so two concurrent handshakes
+	// for the same peer cannot both observe an empty registry and both
+	// register. The lock spans Run as well so the loser's link is closed
+	// before any rt.Done observer can register an unregister.
+	s.peerInstallMu.Lock()
+	defer s.peerInstallMu.Unlock()
+
+	if existing := s.inner.RuntimeFor(peerZID); existing != nil {
+		newCanonical := isCanonicalLink(myZID, peerZID, isInitiator)
+		if !newCanonical {
+			// Existing wins. Close our link without ever spinning up a
+			// runtime — that way the remote side, which kept this link's
+			// far end, doesn't see it drop.
+			_ = link.Close()
+			return nil, nil
+		}
+		// New connection wins — drop the old one before installing.
+		existing.Shutdown()
+	}
+
 	rt, err := s.inner.Run(session.RunConfig{
 		Link:     link,
 		Result:   result,
@@ -346,20 +369,6 @@ func (s *Session) startRuntimeForPeer(link transport.Link, result *session.Hands
 	if err != nil {
 		_ = link.Close()
 		return nil, fmt.Errorf("run: %w", err)
-	}
-
-	myZID := s.zid.ToWireID().Bytes
-	peerZID := result.PeerZID.Bytes
-
-	if existing := s.inner.RuntimeFor(peerZID); existing != nil {
-		// Two connections to the same peer. Keep the canonical one.
-		newCanonical := isCanonicalLink(myZID, peerZID, isInitiator)
-		if !newCanonical {
-			rt.Shutdown()
-			return rt, nil // not registered; caller treats as success
-		}
-		// New connection wins — drop the old one.
-		existing.Shutdown()
 	}
 
 	s.inner.RegisterRuntime(peerZID, rt)

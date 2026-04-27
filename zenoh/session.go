@@ -83,6 +83,12 @@ type Session struct {
 	// peerWG tracks per-endpoint dial loops + accept loops + per-runtime
 	// watcher goroutines spawned in peer mode. Close awaits them.
 	peerWG sync.WaitGroup
+	// peerInstallMu serialises startRuntimeForPeer's "check existing →
+	// register" sequence so the canonical-link tiebreak observes a stable
+	// registry. Without it, two concurrent mutual-dial handshakes can
+	// both see no existing entry and overwrite each other, leaving the
+	// non-canonical link installed and triggering a teardown cascade.
+	peerInstallMu sync.Mutex
 	// listeners is the list of bound transport.Listener instances in peer
 	// mode. Close iterates them.
 	listenersMu sync.Mutex
@@ -119,7 +125,11 @@ func Open(ctx context.Context, cfg Config) (*Session, error) {
 		return nil, err
 	}
 
-	inner := session.New()
+	innerOpts := []session.Option{}
+	if cfg.Mode == ModePeer {
+		innerOpts = append(innerOpts, session.WithMultiRuntime())
+	}
+	inner := session.New(innerOpts...)
 	s := &Session{
 		cfg:                  cfg,
 		backoff:              reconnectConfigFromUser(cfg),

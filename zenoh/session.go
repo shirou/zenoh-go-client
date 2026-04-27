@@ -14,6 +14,19 @@ import (
 	"github.com/shirou/zenoh-go-client/internal/wire"
 )
 
+// sessionModeToWire converts the public SessionMode to the wire-level
+// WhatAmI used in INIT/OPEN/JOIN handshakes.
+func sessionModeToWire(m SessionMode) wire.WhatAmI {
+	switch m {
+	case ModePeer:
+		return wire.WhatAmIPeer
+	case ModeRouter:
+		return wire.WhatAmIRouter
+	default:
+		return wire.WhatAmIClient
+	}
+}
+
 // Session is the client's connection to a zenoh router or peer. Session
 // values are safe for concurrent use.
 //
@@ -164,7 +177,7 @@ func (s *Session) dialAndRun(ctx context.Context) (*session.Runtime, error) {
 	}
 	hcfg := session.DefaultHandshakeConfig()
 	hcfg.ZID = s.zid.ToWireID()
-	hcfg.WhatAmI = wire.WhatAmIClient
+	hcfg.WhatAmI = sessionModeToWire(s.cfg.Mode)
 	result, err := session.DoHandshake(link, hcfg)
 	if err != nil {
 		link.Close()

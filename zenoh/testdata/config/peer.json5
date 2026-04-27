@@ -1,0 +1,13 @@
+// Peer mode with a listener, an outbound endpoint, and an autoconnect mask
+// scoped to the local "peer" role per Rust's per-role config form.
+{
+  mode: "peer",
+  connect: { endpoints: ["tcp/192.0.2.10:7447"] },
+  listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+  scouting: {
+    multicast: {
+      enabled: true,
+      autoconnect: { router: ["peer", "router"], peer: ["peer", "router"], client: [] },
+    },
+  },
+}

@@ -16,8 +16,12 @@ services:
       - "17447:7447"
     environment:
       RUST_LOG: "zenoh=info"
+    # `-l=tcp/0.0.0.0:7447` makes zenohd bind IPv4-only, while the default
+    # (no `-l`) binds `[::]:7447` and dual-stacks. busybox `nc -z localhost`
+    # tries `::1` first (per /etc/hosts ordering) and exits 1 against an
+    # IPv4-only listener — so probe `127.0.0.1` explicitly.
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "7447"]
+      test: ["CMD", "nc", "-z", "127.0.0.1", "7447"]
       interval: 2s
       timeout: 2s
       retries: 15
@@ -36,7 +40,7 @@ services:
     environment:
       RUST_LOG: "zenoh=info"
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "7447"]
+      test: ["CMD", "nc", "-z", "127.0.0.1", "7447"]
       interval: 2s
       timeout: 2s
       retries: 15

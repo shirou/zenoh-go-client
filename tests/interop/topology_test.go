@@ -413,9 +413,14 @@ func TestChainMultiQueryables(t *testing.T) {
 
 	time.Sleep(subPropagationDelay * 3)
 
+	// ConsolidationNone is required: the three queryables reply with the
+	// same key, and the default ConsolidationAuto (= Latest) would dedupe
+	// them down to a single newest-timestamp sample.
 	replies, err := getSess.Get(ke, &zenoh.GetOptions{
-		Target:    zenoh.QueryTargetAll,
-		HasTarget: true,
+		Target:           zenoh.QueryTargetAll,
+		HasTarget:        true,
+		Consolidation:    zenoh.ConsolidationNone,
+		HasConsolidation: true,
 	})
 	if err != nil {
 		t.Fatalf("Get: %v", err)

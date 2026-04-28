@@ -126,11 +126,30 @@ for hello := range ch {
 }
 ```
 
+### Multicast peer (no router)
+
+A `udp/<group>:port` entry in `Endpoints` opens a multicast peer
+transport: every peer JOINs the group, fans `Put` / `Delete` and
+DECLARE through it, and surfaces other peers via
+`Session.MulticastPeers()`. No `zenohd` required.
+
+```go
+cfg := zenoh.Config{
+    Mode:      zenoh.ModePeer,
+    Endpoints: []string{"udp/224.0.0.224:7447"},
+}
+session, _ := zenoh.Open(ctx, cfg)
+defer session.Close()
+
+// Same Pub / Sub API as above — declarations and Put traverse the
+// multicast group and reach every other peer that joined it.
+```
+
 Runnable variants live under [`examples/`](examples/):
 `z_pub`, `z_sub`, `z_get`, `z_queryable`, `z_liveliness`, `z_put`,
 `z_delete`, `z_info`, `z_scout`, `z_pull`, `z_querier`, `z_storage`,
 `z_get_liveliness`, `z_sub_liveliness`, `z_ping`, `z_pong`, `z_pub_thr`,
-`z_sub_thr`.
+`z_sub_thr`, `z_pub_matching`.
 
 ## Implemented features
 
@@ -170,6 +189,11 @@ Runnable variants live under [`examples/`](examples/):
   - `FifoChannel[T]` — bounded channel, drop-on-full
   - `RingChannel[T]` — bounded channel, drop-oldest
 - Per-emission options: encoding, priority, congestion control (`Block` / `Drop`), express
+- **Self-delivery** — A `Put` reaches matching Subscribers in the same
+  Session via local dispatch (matching zenoh-rust's default
+  `Locality::Any`). The wire round-trip through the router is
+  suppressed by zenohd's `egress_filter`, so each subscriber sees
+  exactly one delivery.
 
 ### Encoding
 
@@ -258,12 +282,12 @@ auto-dials any HELLO whose role matches `AutoconnectMask` (default
 `WhatPeer | WhatRouter`). Simultaneous mutual dials converge to one
 canonical link per pair via a deterministic ZenohID-lex tiebreak.
 
-### Multicast peer (discovery-only)
+### Multicast peer
 
 Adding a `udp/<group>:port` entry to `Endpoints` opens a multicast
-peer transport that emits JOIN every `lease/4` and refreshes a peer
-table from incoming JOINs. Peers visible on the group surface through
-`Session.MulticastPeers()`.
+peer transport that JOINs every `lease/4`, fans PUSH and DECLARE
+through the group, and reassembles FRAGMENTed messages per peer.
+Peers visible on the group surface through `Session.MulticastPeers()`.
 
 ```go
 cfg := zenoh.Config{
@@ -272,11 +296,26 @@ cfg := zenoh.Config{
 }
 ```
 
-**Status: discovery-only.** This is sufficient to enumerate every peer
-broadcasting on the group and to surface `MulticastPeers()`, but the
-multicast FRAME / FRAGMENT data path (pub/sub propagation through the
-group) is a follow-up. For pub/sub today, combine multicast peer mode
-with a unicast peer or router endpoint.
+What works end-to-end:
+
+- **Pub/sub propagation** — `Put` / `Delete` on one peer reach matching
+  Subscribers on every other peer in the group.
+- **DECLARE flooding** — `D_SUBSCRIBER` / `D_QUERYABLE` / `D_TOKEN` and
+  the corresponding undeclares traverse the multicast group; on JOIN of
+  a freshly-discovered peer we re-flood our local declarations so the
+  new peer catches up without waiting for explicit re-declaration.
+- **Per-(peer, entity_id) matching dedup** — multicast's repeated
+  declaration floods don't inflate `MatchingListener` counters; the
+  registry mirrors zenoh-rust's broker face accounting.
+- **Hybrid unicast + multicast deployments** — `enqueueNetwork` adds a
+  prefer-unicast skip so a peer reachable via both transports doesn't
+  receive duplicates; mixed-reachability groups (some peers
+  unicast-only, some multicast-only) still work, with a known caveat
+  that the unicast-reachable subset can see one duplicate per send.
+
+What's deferred (REQUEST / RESPONSE on multicast, INTEREST replay over
+the group, multi-group per session, IPv6 SSM) is tracked under
+[Future work](#future-work).
 
 Multicast is exercised on Linux. Windows / macOS multicast routing
 varies by host configuration; use at your own risk.
@@ -388,10 +427,18 @@ Not yet implemented, in rough priority order:
 - **Auth extension** (username/password, public-key)
 - **LowLatency mode** (INIT extension 0x5)
 - **Compression extension** (0x6)
-- **Multicast pub/sub propagation** — multicast peer mode is currently
-  discovery-only (JOIN emit + receive + peer table); FRAME / FRAGMENT
-  forwarding through the group, per-peer reassembly, and FRAME seq-num
-  monotonicity checks are deferred follow-ups
+- **REQUEST / RESPONSE over multicast** — pub/sub and DECLARE work over
+  the multicast group, but Get / Queryable replies are dropped on the
+  multicast receive path (queries are typically routed via unicast peer
+  links in zenoh-rust)
+- **INTEREST replay over multicast** — `OnPeerJoin` re-floods our local
+  DECLAREs to a freshly-discovered peer, but Publisher / Querier
+  INTEREST registrations are not yet replayed the same way
+- **Receiver-side dedup for hybrid unicast+multicast** — when some
+  group members are reachable via unicast and others only via
+  multicast, the unicast-reachable subset can see one duplicate per
+  send. A `(srcZID, KeyExpr, Timestamp)` LRU on the receive path
+  closes this when Timestamp is set.
 - **Patch ≥ 1 wire features** (`BlockFirst`, FRAGMENT First/Drop markers)
 - Benchmark suite
 - expvar / Prometheus metrics hooks
@@ -405,14 +452,22 @@ make interop-test  # go test -race -tags interop ./tests/interop/...
 make interop-down
 ```
 
-The Scout test uses a host-networked zenohd (Linux only) so multicast
-traffic reaches the Go process running on the host:
+The multicast suite uses a host-networked zenohd plus a host-networked
+Python sidecar (Linux only) so multicast traffic reaches both the Go
+process running on the host and the Python peer in the container. It
+covers Scout / HELLO discovery and Go ↔ Python pub/sub over a
+multicast group:
 
 ```sh
 make interop-multicast-up
 make interop-multicast-test
 make interop-multicast-down
 ```
+
+Run the wrong harness (`interop-up` instead of `interop-multicast-up`)
+and the tests `t.Skip` with a clear message — they probe the multicast
+group with a SCOUT before declaring the harness ready, so a bridge-
+networked zenohd doesn't trick them into running.
 
 ## License
 

@@ -97,9 +97,15 @@ func (s *Session) startMulticastEndpoint(endpoint string) error {
 		return fmt.Errorf("parse %q: %w", endpoint, err)
 	}
 	link, err := transport.DialMulticastUDP(loc, transport.MulticastDialOpts{
-		Interface:        nil,
-		TTL:              s.cfg.Scouting.MulticastTTL,
-		LoopbackDisabled: true, // do not register our own JOIN as a peer
+		Interface: nil,
+		TTL:       s.cfg.Scouting.MulticastTTL,
+		// LoopbackDisabled is intentionally left false. Setting
+		// IP_MULTICAST_LOOP=0 on Linux/WSL2 silently drops our outbound
+		// multicast for *every* listener including peers on other
+		// hosts, not just our own listen socket. Self-loopback
+		// filtering is handled at the JOIN/FRAME layer via the
+		// self-ZID guard in handleDatagram, which is already covered
+		// by TestMulticastSelfFilterLoopback.
 	})
 	if err != nil {
 		return fmt.Errorf("dial multicast %q: %w", endpoint, err)

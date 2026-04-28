@@ -18,14 +18,22 @@ from python_common import DONE, GO, READY, emit
 
 
 def open_multicast_peer_session() -> zenoh.Session:
+    # Rust forbids multicast endpoints in connect/endpoints (see
+    # zenoh/src/net/runtime/orchestrator.rs:752 "Forbidden multicast
+    # endpoint in connect list"). The multicast peer transport is
+    # opened via listen/endpoints instead, which dispatches to
+    # add_listener_multicast in the transport manager.
     group = os.environ.get("ZENOH_MULTICAST_GROUP", "udp/224.0.0.224:7446")
     cfg = zenoh.Config()
     cfg.insert_json5("mode", '"peer"')
-    cfg.insert_json5("connect/endpoints", json.dumps([group]))
-    # Multicast scouting is what discovers the group; explicit endpoint
-    # plus scouting=true is the rust default for peer-multicast.
-    cfg.insert_json5("scouting/multicast/enabled", "true")
-    cfg.insert_json5("scouting/multicast/address", json.dumps(group.removeprefix("udp/")))
+    cfg.insert_json5("listen/endpoints", json.dumps([group]))
+    cfg.insert_json5("scouting/multicast/enabled", "false")
+    # Match the Go peer's wire: we always attach the QoS extension to
+    # JOINs and FRAMEs (16 lane SNs). Rust drops a JOIN with ext_qos
+    # when transport/multicast/qos/enabled is false (the default in
+    # DEFAULT_CONFIG.json5), so explicitly opt in here. See
+    # io/zenoh-transport/src/multicast/rx.rs:137 for the gate.
+    cfg.insert_json5("transport/multicast/qos/enabled", "true")
     return zenoh.open(cfg)
 
 

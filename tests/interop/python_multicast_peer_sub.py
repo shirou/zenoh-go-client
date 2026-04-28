@@ -13,12 +13,16 @@ from python_common import DONE, READY, emit, sample_to_json
 
 
 def open_multicast_peer_session() -> zenoh.Session:
+    # See python_multicast_peer_pub.py for why the multicast group goes
+    # in listen/endpoints rather than connect/endpoints.
     group = os.environ.get("ZENOH_MULTICAST_GROUP", "udp/224.0.0.224:7446")
     cfg = zenoh.Config()
     cfg.insert_json5("mode", '"peer"')
-    cfg.insert_json5("connect/endpoints", json.dumps([group]))
-    cfg.insert_json5("scouting/multicast/enabled", "true")
-    cfg.insert_json5("scouting/multicast/address", json.dumps(group.removeprefix("udp/")))
+    cfg.insert_json5("listen/endpoints", json.dumps([group]))
+    cfg.insert_json5("scouting/multicast/enabled", "false")
+    # See python_multicast_peer_pub.py for why we opt in to multicast
+    # QoS — rust's default config drops our QoS-enabled JOIN otherwise.
+    cfg.insert_json5("transport/multicast/qos/enabled", "true")
     return zenoh.open(cfg)
 
 

@@ -30,20 +30,42 @@ type OutboundMessage struct {
 type Batcher struct {
 	batchSize int
 	attachQoS bool
-	initialSN uint64
+	// laneSeeds[priority][reliable] is the starting sequence number for
+	// the lane at first use. Unicast Batchers fill every entry with the
+	// single negotiated initialSN; multicast Batchers carry the 16
+	// independent values advertised in JOIN.
+	laneSeeds [8][2]uint64
 
 	mu    sync.Mutex
 	lanes [8][2]*lane
 	sink  BatchSink
 }
 
-// NewBatcher constructs a Batcher with the given parameters. initialSN is
-// used for every lane as the starting sequence number.
+// NewBatcher constructs a Batcher with a single starting sequence number
+// shared by every lane (unicast convention).
 func NewBatcher(batchSize int, attachQoS bool, initialSN uint64, sink BatchSink) *Batcher {
+	b := &Batcher{
+		batchSize: batchSize,
+		attachQoS: attachQoS,
+		sink:      sink,
+	}
+	for p := range b.laneSeeds {
+		b.laneSeeds[p][0] = initialSN
+		b.laneSeeds[p][1] = initialSN
+	}
+	return b
+}
+
+// NewBatcherWithLaneSeeds constructs a Batcher with per-lane starting
+// SNs. seeds[priority][0] is the best-effort lane, seeds[priority][1]
+// the reliable lane — matching the [8][2]*lane layout used internally.
+// Used by the multicast transport, which advertises 16 independent
+// initial SNs in its JOIN.
+func NewBatcherWithLaneSeeds(batchSize int, attachQoS bool, seeds [8][2]uint64, sink BatchSink) *Batcher {
 	return &Batcher{
 		batchSize: batchSize,
 		attachQoS: attachQoS,
-		initialSN: initialSN,
+		laneSeeds: seeds,
 		sink:      sink,
 	}
 }
@@ -224,7 +246,7 @@ func (b *Batcher) laneFor(p wire.QoSPriority, reliable bool) *lane {
 		b.lanes[pi][ri] = &lane{
 			priority: wire.QoSPriority(pi),
 			reliable: reliable,
-			seqNum:   b.initialSN,
+			seqNum:   b.laneSeeds[pi][ri],
 			batch:    make([]byte, 0, b.batchSize),
 		}
 	}

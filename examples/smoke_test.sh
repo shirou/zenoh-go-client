@@ -8,6 +8,7 @@
 #   z_ping                ↔ z_pong
 #   z_pub_thr             ↔ z_sub_thr
 #   z_liveliness          → z_get_liveliness / z_sub_liveliness
+#   z_pub_matching        + z_sub appearing/disappearing
 #
 # Requires: a zenohd reachable at $ENDPOINT (default tcp/127.0.0.1:7447).
 # The repo's `make interop-up` will start one in docker compose.
@@ -197,6 +198,64 @@ test_pub_sub_thr() {
   stop_pid "$pub_pid"
 }
 
+test_pub_matching() {
+  local name="z_pub_matching + z_sub"
+  info "$name"
+  local key="demo/example/smoke-matching-$$"
+  local pub_log="$LOG_DIR/pub_matching.log"
+  local sub_log="$LOG_DIR/sub_for_matching.log"
+  : > "$pub_log" "$sub_log"
+
+  "$BIN_DIR/z_pub_matching" --endpoint "$ENDPOINT" --key "$key" --value matching \
+    >"$pub_log" 2>&1 &
+  local pub_pid=$!
+
+  # Initial snapshot delivers Matching=false (no subscriber yet).
+  if ! wait_for_line "$pub_log" 'NO MORE matching subscribers' 10; then
+    record_result "$name (initial)" fail "no initial Matching=false delivery"
+    stop_pid "$pub_pid"
+    return
+  fi
+  record_result "$name (initial)" ok
+
+  # Subscriber joins → Matching=true.
+  "$BIN_DIR/z_sub" --endpoint "$ENDPOINT" --key "$key" >"$sub_log" 2>&1 &
+  local sub_pid=$!
+  if wait_for_line "$pub_log" 'has matching subscribers' 10; then
+    record_result "$name (sub-up)" ok
+  else
+    record_result "$name (sub-up)" fail "publisher did not see Matching=true after sub joined"
+    stop_pid "$sub_pid"; stop_pid "$pub_pid"
+    return
+  fi
+
+  # Subscriber leaves → back to Matching=false. Wait for at least one
+  # additional NO-MORE line beyond the initial snapshot — counting
+  # occurrences avoids racing on the line we already observed.
+  local before
+  before=$(grep -c 'NO MORE matching subscribers' "$pub_log" 2>/dev/null || echo 0)
+  stop_pid "$sub_pid"
+
+  local deadline=$(( $(date +%s) + 10 ))
+  local got_drop=0
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    local now
+    now=$(grep -c 'NO MORE matching subscribers' "$pub_log" 2>/dev/null || echo 0)
+    if [ "$now" -gt "$before" ]; then
+      got_drop=1
+      break
+    fi
+    sleep 0.1
+  done
+  if [ "$got_drop" -eq 1 ]; then
+    record_result "$name (sub-down)" ok
+  else
+    record_result "$name (sub-down)" fail "publisher did not see Matching=false after sub left"
+  fi
+
+  stop_pid "$pub_pid"
+}
+
 test_liveliness() {
   local name="z_liveliness → z_get_liveliness / z_sub_liveliness"
   info "$name"
@@ -251,6 +310,7 @@ test_pub_sub
 test_put_storage_get
 test_ping_pong
 test_pub_sub_thr
+test_pub_matching
 test_liveliness
 
 echo

@@ -109,17 +109,18 @@ func (s *Session) enqueueDeclare(msg *wire.Declare) error {
 	return s.enqueueControl(msg)
 }
 
-// sendDeclareSubscriberOn is the per-Runtime variant used by the reconnect
-// replay path so the freshly-installed Link receives D_SUBSCRIBER for
-// every existing local subscriber.
-func (s *Session) sendDeclareSubscriberOn(rt *session.Runtime, id uint32, keyExpr KeyExpr) error {
-	return s.enqueueDeclareOn(rt, &wire.Declare{
+// sendDeclareSubscriberOn is the per-target variant used by the
+// reconnect-replay and the multicast new-peer-discovered paths so a
+// freshly-installed Link or multicast group sees D_SUBSCRIBER for every
+// existing local subscriber.
+func (s *Session) sendDeclareSubscriberOn(target session.EntityReplayTarget, id uint32, keyExpr KeyExpr) error {
+	return s.enqueueDeclareOn(target, &wire.Declare{
 		Body: wire.NewDeclareSubscriber(id, keyExpr.toWire()),
 	})
 }
 
-func (s *Session) enqueueDeclareOn(rt *session.Runtime, msg *wire.Declare) error {
-	return s.enqueueControlOn(rt, msg)
+func (s *Session) enqueueDeclareOn(target session.EntityReplayTarget, msg *wire.Declare) error {
+	return s.enqueueControlOn(target, msg)
 }
 
 // buildSample converts an internal PushSample to a public Sample. The

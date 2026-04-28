@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"github.com/shirou/zenoh-go-client/internal/keyexpr"
+	"github.com/shirou/zenoh-go-client/internal/wire"
 )
 
 // MatchingKind distinguishes which kind of remote declaration a matching
@@ -52,13 +53,30 @@ type matchingEntry struct {
 	// first notification reflects the post-snapshot count.
 	initialDone bool
 
-	// matchCount is the live count of matching remote entities (>=0).
-	// Transitions 0→1 and 1→0 trigger delivery.
-	matchCount int
+	// matchCount == len(declarations); kept as a field so listeners can
+	// observe transitions without re-counting the map. Why a set and
+	// not just an int: multicast OnPeerJoin re-floods D_SUBSCRIBER on
+	// every JOIN, which would inflate a plain counter monotonically.
+	// Mirrors zenoh-rust's per-face (face_id, sub_id) dedup at
+	// io/zenoh/src/net/routing/hat/broker/pubsub.rs:283-346.
+	declarations map[matchingDeclKey]struct{}
+	matchCount   int
 
 	// nextListenerID is the allocator for attached listeners. Never reused.
 	nextListenerID MatchingListenerID
 	listeners      map[MatchingListenerID]matchingListener
+}
+
+// matchingDeclKey identifies one remote D_SUBSCRIBER / D_QUERYABLE
+// emission for dedup purposes. The peer is the remote face's ZID
+// (string-form of the bytes for map keying); the entityID is the per-
+// peer-allocated declaration ID, which is unique within a peer.
+//
+// Different peers can re-use the same entityID — that's why the peer
+// field is part of the key.
+type matchingDeclKey struct {
+	peer     string
+	entityID uint32
 }
 
 // matchingListener pairs a delivery callback with an optional teardown
@@ -74,13 +92,11 @@ type matchingListener struct {
 // interest_id. A single mutex serialises inbound declare events and
 // listener attach/detach so deliveries observe a consistent snapshot.
 //
-// Peer mode caveat: the counter aggregates D_SUBSCRIBER / D_QUERYABLE
-// from every connected peer, which is correct in steady state and on
-// graceful U_SUBSCRIBER / U_QUERYABLE undeclares. If a peer drops
-// abruptly without sending undeclares the counter stays inflated; a
-// follow-up that threads source-peer ZenohID through the dispatcher and
-// switches to a per-peer counter map is needed for fully-correct cross-
-// link tracking.
+// The per-(peer, entityID) declarations set on each entry replaces an
+// earlier aggregate counter that inflated on multicast JOIN re-floods.
+// Abrupt peer drops (no U_*) still leak entries until the link drops
+// and ResetMatching runs (unicast) or the peer's lease expires
+// (multicast); GC by peer ZID is a future hook.
 type matchingRegistry struct {
 	mu   sync.Mutex
 	byID map[uint32]*matchingEntry
@@ -102,9 +118,10 @@ func (s *Session) RegisterMatching(interestID uint32, ke keyexpr.KeyExpr, kind M
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
 	reg.byID[interestID] = &matchingEntry{
-		keyExpr:   ke,
-		kind:      kind,
-		listeners: map[MatchingListenerID]matchingListener{},
+		keyExpr:      ke,
+		kind:         kind,
+		declarations: map[matchingDeclKey]struct{}{},
+		listeners:    map[MatchingListenerID]matchingListener{},
 	}
 }
 
@@ -191,19 +208,24 @@ func (s *Session) GetMatchingStatus(interestID uint32) (MatchingStatus, bool) {
 }
 
 // onMatchingDeclare is called by the dispatch layer for every incoming
-// D_SUBSCRIBER / D_QUERYABLE. It bumps matchCount on every matching
-// entry of the given kind and delivers on 0→1 (only after initial
-// snapshot).
-func (s *Session) onMatchingDeclare(kind MatchingKind, remoteKE keyexpr.KeyExpr) {
-	s.applyMatchingDelta(kind, remoteKE, +1)
+// D_SUBSCRIBER / D_QUERYABLE. It records the (srcZID, entityID) pair
+// against every matching local entry of the given kind and delivers on
+// 0→1 (only after the initial snapshot).
+//
+// Re-declarations of the same (srcZID, entityID) are noops — required
+// for multicast where OnPeerJoin re-floods on every JOIN.
+func (s *Session) onMatchingDeclare(kind MatchingKind, srcZID wire.ZenohID, entityID uint32, remoteKE keyexpr.KeyExpr) {
+	s.applyMatchingDelta(kind, srcZID, entityID, remoteKE, true)
 }
 
-// onMatchingUndeclare is called for every incoming U_SUBSCRIBER / U_QUERYABLE.
-func (s *Session) onMatchingUndeclare(kind MatchingKind, remoteKE keyexpr.KeyExpr) {
-	s.applyMatchingDelta(kind, remoteKE, -1)
+// onMatchingUndeclare is called for every incoming U_SUBSCRIBER /
+// U_QUERYABLE. Removing a (srcZID, entityID) we never saw is a noop.
+func (s *Session) onMatchingUndeclare(kind MatchingKind, srcZID wire.ZenohID, entityID uint32, remoteKE keyexpr.KeyExpr) {
+	s.applyMatchingDelta(kind, srcZID, entityID, remoteKE, false)
 }
 
-func (s *Session) applyMatchingDelta(kind MatchingKind, remoteKE keyexpr.KeyExpr, delta int) {
+func (s *Session) applyMatchingDelta(kind MatchingKind, srcZID wire.ZenohID, entityID uint32, remoteKE keyexpr.KeyExpr, declare bool) {
+	declKey := matchingDeclKey{peer: string(srcZID.Bytes), entityID: entityID}
 	reg := s.regMatching()
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
@@ -211,14 +233,28 @@ func (s *Session) applyMatchingDelta(kind MatchingKind, remoteKE keyexpr.KeyExpr
 		if entry.kind != kind {
 			continue
 		}
-		if !entry.keyExpr.Intersects(remoteKE) {
+		// Declare needs the keyExpr to know if this entity matches.
+		// Undeclare uses the (peer, entityID) dedup key as the source
+		// of truth — it was added on declare only if it intersected,
+		// so skipping the intersect check on the undeclare path is
+		// safe and lets us handle U_SUBSCRIBER / U_QUERYABLE with an
+		// empty WireExpr (zenohd's common shape).
+		if declare && !entry.keyExpr.Intersects(remoteKE) {
 			continue
 		}
 		before := entry.matchCount
-		entry.matchCount += delta
-		if entry.matchCount < 0 {
-			// Protect against double-undeclare from a misbehaving router.
-			entry.matchCount = 0
+		if declare {
+			if _, dup := entry.declarations[declKey]; dup {
+				continue
+			}
+			entry.declarations[declKey] = struct{}{}
+			entry.matchCount = len(entry.declarations)
+		} else {
+			if _, present := entry.declarations[declKey]; !present {
+				continue
+			}
+			delete(entry.declarations, declKey)
+			entry.matchCount = len(entry.declarations)
 		}
 		if !entry.initialDone {
 			continue
@@ -260,10 +296,10 @@ func (s *Session) onMatchingSnapshotDone(interestID uint32) bool {
 	return true
 }
 
-// ResetMatching clears all counts and snapshot flags. Called on reconnect
-// before INTEREST replay so the new session's snapshot starts from a
-// clean count. Listeners are preserved and will be re-notified once the
-// fresh DeclareFinal arrives.
+// ResetMatching clears all counts, dedup sets, and snapshot flags.
+// Called on reconnect before INTEREST replay so the new session's
+// snapshot starts from a clean count. Listeners are preserved and will
+// be re-notified once the fresh DeclareFinal arrives.
 func (s *Session) ResetMatching() {
 	reg := s.regMatching()
 	reg.mu.Lock()
@@ -271,5 +307,6 @@ func (s *Session) ResetMatching() {
 	for _, entry := range reg.byID {
 		entry.matchCount = 0
 		entry.initialDone = false
+		entry.declarations = map[matchingDeclKey]struct{}{}
 	}
 }

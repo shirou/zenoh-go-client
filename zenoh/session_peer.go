@@ -86,10 +86,11 @@ func validateEndpointsParse(eps []string) error {
 }
 
 // startMulticastEndpoint dials the given multicast group locator and
-// starts a JOIN-driven MulticastRuntime against it. Pub/sub propagation
-// is not yet wired — the runtime is discovery-only at present, so
-// declarations on this Session still need a unicast peer or router for
-// data delivery.
+// starts a MulticastRuntime against it. The runtime carries both the
+// JOIN-based discovery and the bidirectional FRAME / FRAGMENT data
+// path, so peers reachable only via this multicast group can exchange
+// PUSH and DECLARE traffic without a unicast peer or zenohd in the
+// middle.
 func (s *Session) startMulticastEndpoint(endpoint string) error {
 	loc, err := locator.Parse(endpoint)
 	if err != nil {
@@ -103,14 +104,31 @@ func (s *Session) startMulticastEndpoint(endpoint string) error {
 	if err != nil {
 		return fmt.Errorf("dial multicast %q: %w", endpoint, err)
 	}
-	rt, err := s.inner.StartMulticastPeer(session.MulticastConfig{
+	// OnPeerJoin replays our local DECLAREs to the new peer through
+	// this multicast runtime so the freshly-arrived peer learns about
+	// our existing entities without waiting for us to declare anything
+	// else. The runtime is passed alongside the entry, eliminating the
+	// "first JOIN arrives before we've stored the runtime pointer
+	// externally" race that a captured-pointer pattern would have.
+	cfg := session.MulticastConfig{
 		Link:        link,
 		ZID:         s.zid.ToWireID(),
 		WhatAmI:     sessionModeToWire(s.cfg.Mode),
 		LeaseMillis: 10000,
 		BatchSize:   uint16(transport.MulticastBatchSize),
+		Dispatch:    s.inner.MulticastDispatcher(),
 		Logger:      s.inner.Logger(),
-	})
+		OnPeerJoin: func(mrt *session.MulticastRuntime, _ *session.MulticastPeerEntry) {
+			// Off the JOIN reader goroutine: replay can do many
+			// enqueues, and we don't want to block JOIN processing.
+			s.peerWG.Go(func() {
+				if err := s.replayToTarget(mrt); err != nil {
+					s.inner.Logger().Debug("multicast: replay to new peer failed", "err", err)
+				}
+			})
+		},
+	}
+	rt, err := s.inner.StartMulticastPeer(cfg)
 	if err != nil {
 		_ = link.Close()
 		return err
@@ -366,7 +384,7 @@ func (s *Session) startRuntimeForPeer(link transport.Link, result *session.Hands
 	rt, err := s.inner.Run(session.RunConfig{
 		Link:     link,
 		Result:   result,
-		Dispatch: s.inner.NetworkDispatcher(),
+		Dispatch: s.inner.NetworkDispatcherForPeer(result.PeerZID),
 	})
 	if err != nil {
 		_ = link.Close()
@@ -375,7 +393,7 @@ func (s *Session) startRuntimeForPeer(link transport.Link, result *session.Hands
 
 	s.inner.RegisterRuntime(peerZID, rt)
 	s.curRuntime.Store(rt)
-	if err := s.replayToRuntime(rt); err != nil {
+	if err := s.replayToTarget(rt); err != nil {
 		s.inner.Logger().Warn("peer-mode replay failed", "err", err)
 	}
 	// Watch for runtime teardown so accepted / scout-triggered runtimes

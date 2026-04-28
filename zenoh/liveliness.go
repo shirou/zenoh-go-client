@@ -82,9 +82,9 @@ func (s *Session) sendDeclareToken(id uint32, keyExpr KeyExpr) error {
 	return s.enqueueDeclare(buildDeclareToken(id, keyExpr))
 }
 
-// sendDeclareTokenOn is the per-Runtime variant for replay.
-func (s *Session) sendDeclareTokenOn(rt *session.Runtime, id uint32, keyExpr KeyExpr) error {
-	return s.enqueueDeclareOn(rt, buildDeclareToken(id, keyExpr))
+// sendDeclareTokenOn is the per-target variant for replay.
+func (s *Session) sendDeclareTokenOn(target session.EntityReplayTarget, id uint32, keyExpr KeyExpr) error {
+	return s.enqueueDeclareOn(target, buildDeclareToken(id, keyExpr))
 }
 
 func buildDeclareToken(id uint32, keyExpr KeyExpr) *wire.Declare {
@@ -198,9 +198,9 @@ func (s *Session) sendLivelinessSubscriberInterest(id uint32, ke KeyExpr, histor
 	return s.enqueueControl(buildLivelinessSubscriberInterest(id, ke, history))
 }
 
-// sendLivelinessSubscriberInterestOn is the per-Runtime variant for replay.
-func (s *Session) sendLivelinessSubscriberInterestOn(rt *session.Runtime, id uint32, ke KeyExpr, history bool) error {
-	return s.enqueueControlOn(rt, buildLivelinessSubscriberInterest(id, ke, history))
+// sendLivelinessSubscriberInterestOn is the per-target variant for replay.
+func (s *Session) sendLivelinessSubscriberInterestOn(target session.EntityReplayTarget, id uint32, ke KeyExpr, history bool) error {
+	return s.enqueueControlOn(target, buildLivelinessSubscriberInterest(id, ke, history))
 }
 
 func buildLivelinessSubscriberInterest(id uint32, ke KeyExpr, history bool) *wire.Interest {

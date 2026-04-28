@@ -123,9 +123,9 @@ func (s *Session) sendPublisherInterest(id uint32, ke KeyExpr) error {
 	return s.enqueueControl(buildPublisherInterest(id, ke))
 }
 
-// sendPublisherInterestOn is the per-Runtime variant for replay.
-func (s *Session) sendPublisherInterestOn(rt *session.Runtime, id uint32, ke KeyExpr) error {
-	return s.enqueueControlOn(rt, buildPublisherInterest(id, ke))
+// sendPublisherInterestOn is the per-target variant for replay.
+func (s *Session) sendPublisherInterestOn(target session.EntityReplayTarget, id uint32, ke KeyExpr) error {
+	return s.enqueueControlOn(target, buildPublisherInterest(id, ke))
 }
 
 func buildPublisherInterest(id uint32, ke KeyExpr) *wire.Interest {

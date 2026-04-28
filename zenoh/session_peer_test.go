@@ -235,6 +235,98 @@ func TestPeerModeCloseLeaks(t *testing.T) {
 	}
 }
 
+// TestPeerModeMulticastPubSub: two ModePeer sessions configured ONLY
+// with a multicast UDP endpoint exchange a Put / Subscriber sample
+// without any unicast peer link or zenohd. End-to-end through the
+// public API.
+func TestPeerModeMulticastPubSub(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	port := 27000 + int(time.Now().UnixNano()%200)
+	group := fmt.Sprintf("udp/224.0.0.245:%d", port)
+
+	cfgA := Config{
+		Mode:      ModePeer,
+		ZID:       "0c0c0c0c0c0c0c0c",
+		Endpoints: []string{group},
+	}
+	cfgB := Config{
+		Mode:      ModePeer,
+		ZID:       "0d0d0d0d0d0d0d0d",
+		Endpoints: []string{group},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	sA, err := Open(ctx, cfgA)
+	if err != nil {
+		t.Fatalf("Open(A): %v", err)
+	}
+	defer sA.Close()
+	sB, err := Open(ctx, cfgB)
+	if err != nil {
+		t.Fatalf("Open(B): %v", err)
+	}
+	defer sB.Close()
+
+	// Wait for the JOIN handshake to converge so each session has the
+	// other in its multicast peer table. If the host doesn't allow
+	// multicast (WSL2, locked-down CI) skip rather than fail.
+	if err := waitForCondition(3*time.Second, func() bool {
+		return len(sA.MulticastPeers()) >= 1 && len(sB.MulticastPeers()) >= 1
+	}); err != nil {
+		t.Skip("multicast peer discovery did not converge — likely IGMP unavailable in this sandbox")
+	}
+
+	// B subscribes; A publishes; we expect exactly one delivery on B.
+	type seen struct {
+		key string
+		val string
+	}
+	ch := make(chan seen, 4)
+	subKE, err := NewKeyExpr("demo/multi/**")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub, err := sB.DeclareSubscriber(subKE, Closure[Sample]{
+		Call: func(s Sample) {
+			ch <- seen{key: s.KeyExpr().String(), val: string(s.Payload().Bytes())}
+		},
+	})
+	if err != nil {
+		t.Fatalf("DeclareSubscriber: %v", err)
+	}
+	defer sub.Drop()
+
+	// Give D_SUBSCRIBER (re-)flooding a moment to settle. With Step 6
+	// in place, B's Subscriber registration broadcasts D_SUBSCRIBER,
+	// and A's OnPeerJoin replays its own (none yet) — but the matching
+	// path on A doesn't gate Put delivery; multicast pub/sub flooding
+	// reaches B regardless.
+	time.Sleep(150 * time.Millisecond)
+
+	putKE, err := NewKeyExpr("demo/multi/topic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sA.Put(putKE, NewZBytesFromString("hi-multicast"), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	select {
+	case got := <-ch:
+		if got.key != "demo/multi/topic" {
+			t.Errorf("key = %q, want demo/multi/topic", got.key)
+		}
+		if got.val != "hi-multicast" {
+			t.Errorf("val = %q, want hi-multicast", got.val)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("subscriber on B did not receive A's Put")
+	}
+}
+
 func countRuntimes(s *Session) int {
 	return len(s.inner.SnapshotRuntimes())
 }

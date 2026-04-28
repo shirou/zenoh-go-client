@@ -153,9 +153,9 @@ func (s *Session) sendQuerierInterest(id uint32, ke KeyExpr) error {
 	return s.enqueueControl(buildQuerierInterest(id, ke))
 }
 
-// sendQuerierInterestOn is the per-Runtime variant for replay.
-func (s *Session) sendQuerierInterestOn(rt *session.Runtime, id uint32, ke KeyExpr) error {
-	return s.enqueueControlOn(rt, buildQuerierInterest(id, ke))
+// sendQuerierInterestOn is the per-target variant for replay.
+func (s *Session) sendQuerierInterestOn(target session.EntityReplayTarget, id uint32, ke KeyExpr) error {
+	return s.enqueueControlOn(target, buildQuerierInterest(id, ke))
 }
 
 func buildQuerierInterest(id uint32, ke KeyExpr) *wire.Interest {

@@ -1,4 +1,5 @@
-# Multicast-enabled zenohd for Scout interop tests.
+# Multicast-enabled zenohd for Scout interop tests, plus a Python
+# service for peer-mode multicast pub/sub interop.
 #
 # Uses host networking so the container's multicast traffic is reachable from
 # the host where `go test` runs. Linux only — docker `network_mode: host` is a
@@ -16,3 +17,20 @@ services:
       interval: 2s
       timeout: 2s
       retries: 15
+
+  # Python service for peer-mode multicast interop. Same image as the
+  # default compose so we re-use the python_*.py scripts. Host networking
+  # is required: peer-mode multicast must traverse the host's multicast
+  # group, not the docker bridge.
+  python:
+    build:
+      context: ./interop
+    network_mode: host
+    volumes:
+      - ./interop:/work
+    working_dir: /work
+    environment:
+      PYTHONUNBUFFERED: "1"
+    # Keep the container alive so `docker compose exec python …` from
+    # the test harness can drive scripts on demand.
+    command: ["sleep", "infinity"]

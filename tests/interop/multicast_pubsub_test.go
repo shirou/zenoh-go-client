@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,16 +44,31 @@ var multicastComposeFile = func() string {
 }()
 
 // mcRequireHarness skips when the docker compose harness for the
-// multicast suite isn't running. We probe the same port the existing
-// scout test does — it's bound by zenohd-multicast in host networking,
-// so a TCP dial to 127.0.0.1:7447 is the cheapest readiness check.
+// multicast suite isn't running. The regular `make interop-up` brings
+// up a bridge-networked zenohd that also binds tcp/127.0.0.1:7447, so
+// a plain TCP probe can't tell them apart. We send a SCOUT and require
+// at least one HELLO back within 1.5s — the host-networked zenohd-
+// multicast responds to it; the bridge-networked one doesn't (its
+// multicast scout interface isn't reachable from the host). On
+// failure, the skip message points at the right Make target.
 func mcRequireHarness(t *testing.T) {
 	t.Helper()
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:7447", 2*time.Second)
+	scoutCfg := zenoh.NewConfig()
+	scoutCfg.Scouting.MulticastMode = zenoh.MulticastAuto
+	ch, err := zenoh.Scout(scoutCfg, zenoh.NewFifoChannel[zenoh.Hello](2), &zenoh.ScoutOptions{
+		TimeoutMs: 1500,
+		What:      zenoh.WhatRouter,
+	})
 	if err != nil {
-		t.Skipf("multicast harness not reachable at 127.0.0.1:7447 (run `make interop-multicast-up` first): %v", err)
+		t.Skipf("multicast harness probe failed (run `make interop-multicast-up` first): %v", err)
 	}
-	_ = conn.Close()
+	got := 0
+	for range ch {
+		got++
+	}
+	if got == 0 {
+		t.Skip("no multicast HELLO from zenohd-multicast within 1.5s — run `make interop-multicast-up` (NOT `interop-up`); the regular zenohd is bridge-networked and can't traverse the host's multicast group")
+	}
 }
 
 // mcPyProc is a small wrapper around `docker compose exec -T python`

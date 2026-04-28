@@ -9,10 +9,13 @@ import (
 	"github.com/shirou/zenoh-go-client/internal/wire"
 )
 
-// NetworkDispatcher is the InboundDispatch a Session uses when wired into
-// the reader loop. It decodes network messages and routes them to the
-// appropriate registry (subscribers, queryables, in-flight gets, ...).
-func (s *Session) NetworkDispatcher() InboundDispatch {
+// NetworkDispatcherForPeer is the InboundDispatch a Session uses when
+// wired into the reader loop. The peerZID identifies the remote face
+// the link is bound to (zenohd's ZID in client mode, the remote peer's
+// ZID in unicast peer mode); it's threaded into the matching dedup
+// path so D_SUBSCRIBER / D_QUERYABLE entries from this peer don't
+// collide with same-id entries from a different peer.
+func (s *Session) NetworkDispatcherForPeer(peerZID wire.ZenohID) InboundDispatch {
 	return func(h codec.Header, r *codec.Reader) error {
 		switch h.ID {
 		case wire.IDNetworkPush:
@@ -20,7 +23,7 @@ func (s *Session) NetworkDispatcher() InboundDispatch {
 			if err != nil {
 				return fmt.Errorf("dispatch PUSH: %w", err)
 			}
-			return s.onPush(push)
+			return s.onPushFromPeer(push, peerZID)
 		case wire.IDNetworkRequest:
 			req, err := wire.DecodeRequest(r, h)
 			if err != nil {
@@ -45,7 +48,7 @@ func (s *Session) NetworkDispatcher() InboundDispatch {
 			if err != nil {
 				return fmt.Errorf("dispatch DECLARE: %w", err)
 			}
-			return s.onDeclare(d)
+			return s.onDeclareFromPeer(d, peerZID)
 		case wire.IDNetworkInterest:
 			_, err := wire.DecodeInterest(r, h)
 			return err
@@ -137,7 +140,9 @@ func cloneErrBody(e *wire.ErrBody) *wire.ErrBody {
 	}
 }
 
-// onDeclare routes an inbound DECLARE message. Handled sub-messages:
+// onDeclareFromPeer routes an inbound DECLARE message, threading the
+// originating peer's ZID into the matching dedup path. Handled
+// sub-messages:
 //   - D_KEYEXPR / U_KEYEXPR maintain the receive-side alias table so any
 //     later WireExpr with Scope != 0 can be resolved.
 //   - D_SUBSCRIBER / U_SUBSCRIBER and D_QUERYABLE / U_QUERYABLE drive the
@@ -147,7 +152,7 @@ func cloneErrBody(e *wire.ErrBody) *wire.ErrBody {
 //     to that query's reply channel.
 //   - D_FINAL with an interest_id completes either a matching INTEREST's
 //     initial snapshot or a liveliness Get's reply stream.
-func (s *Session) onDeclare(d *wire.Declare) error {
+func (s *Session) onDeclareFromPeer(d *wire.Declare, srcZID wire.ZenohID) error {
 	switch body := d.Body.(type) {
 	case *wire.DeclareKeyExpr:
 		s.declareRemoteAlias(body.ExprID, body.Scope, body.Suffix)
@@ -158,18 +163,18 @@ func (s *Session) onDeclare(d *wire.Declare) error {
 		case wire.IDDeclareToken:
 			return s.onTokenDeclare(d, body)
 		case wire.IDDeclareSubscriber:
-			return s.onMatchingEntityDeclare(MatchingSubscribers, body)
+			return s.onMatchingEntityDeclare(MatchingSubscribers, srcZID, body)
 		case wire.IDDeclareQueryable:
-			return s.onMatchingEntityDeclare(MatchingQueryables, body)
+			return s.onMatchingEntityDeclare(MatchingQueryables, srcZID, body)
 		}
 	case *wire.UndeclareEntity:
 		switch body.Kind {
 		case wire.IDUndeclareToken:
 			return s.onTokenUndeclare(body)
 		case wire.IDUndeclareSubscriber:
-			return s.onMatchingEntityUndeclare(MatchingSubscribers, body)
+			return s.onMatchingEntityUndeclare(MatchingSubscribers, srcZID, body)
 		case wire.IDUndeclareQueryable:
-			return s.onMatchingEntityUndeclare(MatchingQueryables, body)
+			return s.onMatchingEntityUndeclare(MatchingQueryables, srcZID, body)
 		}
 	case *wire.DeclareFinal:
 		if d.HasInterestID {
@@ -186,21 +191,24 @@ func (s *Session) onDeclare(d *wire.Declare) error {
 
 // onMatchingEntityDeclare resolves the incoming key expression (honouring
 // receive-side aliases) and feeds it into the matching registry.
-func (s *Session) onMatchingEntityDeclare(kind MatchingKind, body *wire.DeclareEntity) error {
+func (s *Session) onMatchingEntityDeclare(kind MatchingKind, srcZID wire.ZenohID, body *wire.DeclareEntity) error {
 	ke, err := s.resolveMatchingKey(body.KeyExpr, kind, "declare")
 	if err != nil || ke.IsZero() {
 		return err
 	}
-	s.onMatchingDeclare(kind, ke)
+	s.onMatchingDeclare(kind, srcZID, body.EntityID, ke)
 	return nil
 }
 
-func (s *Session) onMatchingEntityUndeclare(kind MatchingKind, body *wire.UndeclareEntity) error {
-	ke, err := s.resolveMatchingKey(body.WireExpr, kind, "undeclare")
-	if err != nil || ke.IsZero() {
-		return err
-	}
-	s.onMatchingUndeclare(kind, ke)
+func (s *Session) onMatchingEntityUndeclare(kind MatchingKind, srcZID wire.ZenohID, body *wire.UndeclareEntity) error {
+	// The undeclare path is keyed by (srcZID, entityID); zenohd
+	// commonly sends U_SUBSCRIBER / U_QUERYABLE with an empty
+	// WireExpr because receivers are expected to look the entity up
+	// by id. Don't bail when the WireExpr fails to resolve — pass a
+	// zero KeyExpr through so the dedup-set walk in applyMatchingDelta
+	// can still remove the right entries.
+	ke, _ := s.resolveMatchingKey(body.WireExpr, kind, "undeclare")
+	s.onMatchingUndeclare(kind, srcZID, body.EntityID, ke)
 	return nil
 }
 
@@ -271,9 +279,11 @@ func (s *Session) onTokenUndeclare(body *wire.UndeclareEntity) error {
 	return nil
 }
 
-// onPush builds a PushSample from the decoded PUSH and routes it to every
-// matching subscriber.
-func (s *Session) onPush(p *wire.Push) error {
+// onPushFromPeer builds a PushSample from the decoded PUSH and routes
+// it to every matching subscriber. srcZID identifies the originating
+// peer; populated for both unicast (the Runtime's peer ZID) and
+// multicast (decoded from the datagram source).
+func (s *Session) onPushFromPeer(p *wire.Push, srcZID wire.ZenohID) error {
 	full, ok := s.resolveRemoteKey(p.KeyExpr)
 	if !ok {
 		s.logger.Warn("dispatch PUSH with unknown ExprId alias",
@@ -285,7 +295,7 @@ func (s *Session) onPush(p *wire.Push) error {
 		return fmt.Errorf("dispatch PUSH: invalid key %q: %w", full, err)
 	}
 
-	sample := PushSample{KeyExpr: full, ParsedKeyExpr: ke}
+	sample := PushSample{KeyExpr: full, ParsedKeyExpr: ke, SourceZID: srcZID}
 	switch body := p.Body.(type) {
 	case *wire.PutBody:
 		sample.Kind = wire.IDDataPut

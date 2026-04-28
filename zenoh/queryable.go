@@ -159,9 +159,10 @@ func (s *Session) sendDeclareQueryable(id uint32, keyExpr KeyExpr, opts *Queryab
 	return s.enqueueDeclare(buildDeclareQueryable(id, keyExpr, opts))
 }
 
-// sendDeclareQueryableOn is the per-Runtime variant for replay.
-func (s *Session) sendDeclareQueryableOn(rt *session.Runtime, id uint32, keyExpr KeyExpr, opts *QueryableOptions) error {
-	return s.enqueueDeclareOn(rt, buildDeclareQueryable(id, keyExpr, opts))
+// sendDeclareQueryableOn is the per-target variant for replay (unicast
+// reconnect or multicast new-peer-discovered).
+func (s *Session) sendDeclareQueryableOn(target session.EntityReplayTarget, id uint32, keyExpr KeyExpr, opts *QueryableOptions) error {
+	return s.enqueueDeclareOn(target, buildDeclareQueryable(id, keyExpr, opts))
 }
 
 func buildDeclareQueryable(id uint32, keyExpr KeyExpr, opts *QueryableOptions) *wire.Declare {

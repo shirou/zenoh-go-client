@@ -501,6 +501,69 @@ func TestOpenSessionAndPut(t *testing.T) {
 	}
 }
 
+// TestSessionPutDeliversToOwnSubscriber pins zenoh-rust's default
+// Locality::Any: a Put on a session-owned key reaches a subscriber
+// declared on the same session, without depending on a wire round-
+// trip through the router. The mock router never echoes our PUSH
+// back, so the only way the sample arrives is via local dispatch.
+func TestSessionPutDeliversToOwnSubscriber(t *testing.T) {
+	router := newMockRouter(t)
+	defer router.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cfg := NewConfig().WithEndpoint("tcp/" + router.Addr())
+	sess, err := Open(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+
+	ke, _ := NewKeyExpr("demo/self/**")
+	fifo := NewFifoChannel[Sample](4)
+	sub, err := sess.DeclareSubscriber(ke, fifo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Drop()
+	// Wait for D_SUBSCRIBER on the wire so we know the sub is
+	// registered before we Put. (Not required for local delivery, but
+	// it pins the registration ordering.)
+	select {
+	case <-router.declared:
+	case <-time.After(2 * time.Second):
+		t.Fatal("D_SUBSCRIBER not observed before Put")
+	}
+
+	putKE, _ := NewKeyExpr("demo/self/topic")
+	if err := sess.Put(putKE, NewZBytesFromString("loopback"), nil); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	ch := sub.Handler().(<-chan Sample)
+	select {
+	case sample := <-ch:
+		if sample.KeyExpr().String() != "demo/self/topic" {
+			t.Errorf("key = %q, want demo/self/topic", sample.KeyExpr().String())
+		}
+		if sample.Payload().String() != "loopback" {
+			t.Errorf("payload = %q, want loopback", sample.Payload().String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("own subscriber did not receive own Put within 2s")
+	}
+
+	// And exactly once — the wire echo from a real router would be
+	// suppressed by zenohd's egress_filter, but our mock router
+	// doesn't echo at all, so any second delivery would have to come
+	// from a duplicate local dispatch.
+	select {
+	case extra := <-ch:
+		t.Errorf("unexpected duplicate delivery: %+v", extra)
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
 func TestDeclareSubscriberReceivesInjectedPush(t *testing.T) {
 	router := newMockRouter(t)
 	defer router.Close()

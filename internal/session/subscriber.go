@@ -16,6 +16,14 @@ import (
 // raw suffix text.
 //
 // Payload aliases the reader buffer unless the subscriber callback copies.
+//
+// SourceZID is populated when the PUSH was received over a multicast
+// transport (so the originating peer's ZID is meaningful and recoverable
+// from the datagram source). For unicast PUSHes it is the zero value —
+// the unicast Runtime is already keyed by peer ZID, so there is no
+// useful additional source information at this level. The field is not
+// yet surfaced through the public Sample API; it exists as a hook for
+// future per-peer matching-registry accounting and for tests.
 type PushSample struct {
 	KeyExpr       string
 	ParsedKeyExpr keyexpr.KeyExpr
@@ -23,6 +31,7 @@ type PushSample struct {
 	Payload       []byte
 	Encoding      *wire.Encoding
 	Timestamp     *wire.Timestamp
+	SourceZID     wire.ZenohID
 }
 
 // DeliverFn is what Session.RegisterSubscriber stores for inbound delivery.
@@ -80,6 +89,19 @@ func (s *Session) ForEachSubscriber(fn func(id uint32, ke keyexpr.KeyExpr)) {
 	for id, sub := range reg.byID {
 		fn(id, sub.keyExpr)
 	}
+}
+
+// DispatchLocalPush is the public entry the zenoh-layer Put / Delete
+// path calls so a session's own published samples reach its own
+// matching subscribers without a wire round-trip. Mirrors zenoh-rust's
+// default Locality::Any: the source session dispatches locally before
+// sending to the wire, and zenohd's egress_filter prevents the wire
+// echo from producing a second delivery.
+//
+// SourceZID identifies the publishing session as the source for any
+// downstream per-peer accounting; callers pass their own ZID.
+func (s *Session) DispatchLocalPush(pushKE keyexpr.KeyExpr, sample PushSample) {
+	s.dispatchPush(pushKE, sample)
 }
 
 // dispatchPush routes an inbound PUSH to every subscriber whose key

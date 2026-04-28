@@ -305,7 +305,7 @@ func (s *Session) dialAndRun(ctx context.Context) (*session.Runtime, error) {
 	rt, err := s.inner.Run(session.RunConfig{
 		Link:     link,
 		Result:   result,
-		Dispatch: s.inner.NetworkDispatcher(),
+		Dispatch: s.inner.NetworkDispatcherForPeer(result.PeerZID),
 	})
 	if err != nil {
 		link.Close()
@@ -425,8 +425,9 @@ func (s *Session) userCloseCtx() context.Context {
 // the caller.
 //
 // In client mode there is exactly one Runtime, so this is equivalent to
-// replayToRuntime against that singleton. The thin wrapper exists so
-// peer-mode lifecycle code can target a specific newly-installed Link.
+// replayToTarget against that singleton. The thin wrapper exists so
+// peer-mode lifecycle code can target a specific newly-installed Link
+// or a freshly-discovered multicast peer.
 func (s *Session) replayEntities() error {
 	s.inner.ResetRemoteAliases()
 	s.inner.ResetInboundTokens()
@@ -439,16 +440,21 @@ func (s *Session) replayEntities() error {
 	if rt == nil {
 		return ErrSessionNotReady
 	}
-	return s.replayToRuntime(rt)
+	return s.replayToTarget(rt)
 }
 
-// replayToRuntime emits the catch-up declarations to the given Runtime.
-// Each registry is snapshotted into a slice of replayEntry closures with
-// its own lock released before any send fires — holding a registry lock
-// across a blocking enqueue would serialise declare / undeclare calls
-// for the full duration of replay.
-func (s *Session) replayToRuntime(rt *session.Runtime) error {
-	if rt == nil {
+// replayToTarget emits the catch-up declarations to the given replay
+// target. Each registry is snapshotted into a slice of replayEntry
+// closures with its own lock released before any send fires — holding a
+// registry lock across a blocking enqueue would serialise declare /
+// undeclare calls for the full duration of replay.
+//
+// The target is any session.EntityReplayTarget — both unicast Runtime
+// (used after reconnect) and MulticastRuntime (used by OnPeerJoin to
+// catch a newly-discovered multicast peer up to our local declarations)
+// implement it.
+func (s *Session) replayToTarget(target session.EntityReplayTarget) error {
+	if target == nil {
 		return ErrSessionNotReady
 	}
 	var plan []replayEntry
@@ -456,20 +462,20 @@ func (s *Session) replayToRuntime(rt *session.Runtime) error {
 	s.inner.ForEachSubscriber(func(id uint32, ke intkeyexpr.KeyExpr) {
 		k := KeyExpr{inner: ke}
 		plan = append(plan, replayEntry{id, "D_SUBSCRIBER", func() error {
-			return s.sendDeclareSubscriberOn(rt, id, k)
+			return s.sendDeclareSubscriberOn(target, id, k)
 		}})
 	})
 	s.inner.ForEachQueryable(func(id uint32, ke intkeyexpr.KeyExpr, complete bool) {
 		k := KeyExpr{inner: ke}
 		opts := &QueryableOptions{Complete: complete}
 		plan = append(plan, replayEntry{id, "D_QUERYABLE", func() error {
-			return s.sendDeclareQueryableOn(rt, id, k, opts)
+			return s.sendDeclareQueryableOn(target, id, k, opts)
 		}})
 	})
 	s.tokensMu.Lock()
 	for id, ke := range s.tokens {
 		plan = append(plan, replayEntry{id, "D_TOKEN", func() error {
-			return s.sendDeclareTokenOn(rt, id, ke)
+			return s.sendDeclareTokenOn(target, id, ke)
 		}})
 	}
 	s.tokensMu.Unlock()
@@ -477,7 +483,7 @@ func (s *Session) replayToRuntime(rt *session.Runtime) error {
 	for id, q := range s.queriers {
 		ke := q.keyExpr
 		plan = append(plan, replayEntry{id, "INTEREST", func() error {
-			return s.sendQuerierInterestOn(rt, id, ke)
+			return s.sendQuerierInterestOn(target, id, ke)
 		}})
 	}
 	s.queriersMu.Unlock()
@@ -485,7 +491,7 @@ func (s *Session) replayToRuntime(rt *session.Runtime) error {
 	for id, p := range s.publishers {
 		ke := p.keyExpr
 		plan = append(plan, replayEntry{id, "INTEREST[publisher]", func() error {
-			return s.sendPublisherInterestOn(rt, id, ke)
+			return s.sendPublisherInterestOn(target, id, ke)
 		}})
 	}
 	s.publishersMu.Unlock()
@@ -494,7 +500,7 @@ func (s *Session) replayToRuntime(rt *session.Runtime) error {
 		ke := st.keyExpr
 		history := st.history
 		plan = append(plan, replayEntry{id, "INTEREST[liveliness]", func() error {
-			return s.sendLivelinessSubscriberInterestOn(rt, id, ke, history)
+			return s.sendLivelinessSubscriberInterestOn(target, id, ke, history)
 		}})
 	}
 	s.livelinessSubsMu.Unlock()
@@ -574,6 +580,20 @@ func (s *Session) snapshotRuntime() *session.Runtime {
 // established remote peer.
 func (s *Session) snapshotAllRuntimes() []*session.Runtime {
 	return s.inner.SnapshotRuntimes()
+}
+
+// snapshotMulticastRuntimes returns every active multicast runtime
+// owned by this Session. Empty when the session has no UDP-multicast
+// endpoint, or after Close has torn them down.
+func (s *Session) snapshotMulticastRuntimes() []*session.MulticastRuntime {
+	s.multicastMu.Lock()
+	defer s.multicastMu.Unlock()
+	if len(s.multicastRuntimes) == 0 {
+		return nil
+	}
+	out := make([]*session.MulticastRuntime, len(s.multicastRuntimes))
+	copy(out, s.multicastRuntimes)
+	return out
 }
 
 // resolveZID parses hex or falls back to a fresh random ID.

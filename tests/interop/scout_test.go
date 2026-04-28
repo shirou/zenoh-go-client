@@ -3,22 +3,35 @@
 package interop
 
 import (
-	"net"
 	"testing"
-	"time"
 
 	"github.com/shirou/zenoh-go-client/zenoh"
 )
 
-// requireMulticastZenohd skips the test unless 127.0.0.1:7447 accepts TCP —
-// the signal that our host-networked zenohd-multicast container is up.
+// requireMulticastZenohd skips the test unless a SCOUT round-trip to
+// the multicast group succeeds. A plain TCP probe to 127.0.0.1:7447
+// can't tell zenohd-multicast (host networking, multicast reachable)
+// apart from the regular interop-up zenohd (bridge networking, no
+// multicast traversal) — both bind 7447 on localhost. Send a SCOUT and
+// require ≥1 HELLO; on miss, point at the right Make target.
 func requireMulticastZenohd(t *testing.T) {
 	t.Helper()
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:7447", 2*time.Second)
+	cfg := zenoh.NewConfig()
+	cfg.Scouting.MulticastMode = zenoh.MulticastAuto
+	ch, err := zenoh.Scout(cfg, zenoh.NewFifoChannel[zenoh.Hello](2), &zenoh.ScoutOptions{
+		TimeoutMs: 1500,
+		What:      zenoh.WhatRouter,
+	})
 	if err != nil {
-		t.Skipf("multicast zenohd not reachable at 127.0.0.1:7447 (run `make interop-multicast-up` first): %v", err)
+		t.Skipf("multicast scout setup failed (run `make interop-multicast-up`): %v", err)
 	}
-	_ = conn.Close()
+	got := 0
+	for range ch {
+		got++
+	}
+	if got == 0 {
+		t.Skip("no multicast HELLO from zenohd-multicast within 1.5s — run `make interop-multicast-up` (NOT `interop-up`); the regular zenohd is bridge-networked and can't traverse the host's multicast group")
+	}
 }
 
 // TestScoutFindsZenohd broadcasts SCOUT on the default IPv4 group and expects

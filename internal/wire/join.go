@@ -2,6 +2,7 @@ package wire
 
 import (
 	"fmt"
+	"math/rand/v2"
 
 	"github.com/shirou/zenoh-go-client/internal/codec"
 )
@@ -72,6 +73,26 @@ func (m *Join) EncodeTo(w *codec.Writer) error {
 type LaneSNs struct {
 	Reliable   [8]uint64
 	BestEffort [8]uint64
+}
+
+// GenerateMulticastInitialSNs returns 16 independent uniform-random
+// initial sequence numbers, one per (priority, reliable) lane.
+//
+// Why: rust uses `prng.gen_range(0..=mask)` (inclusive) at
+// io/zenoh-transport/src/multicast/establishment.rs:42-58. Go's
+// `rand.Uint64N(mask + 1)` returns uniform [0, mask] which matches.
+// The simpler `rand.Uint64() & mask` is also uniform when mask+1 is a
+// power of two — and in zenoh's resolution byte every legal mask
+// happens to be — but Uint64N is the form that survives a future spec
+// change to a non-2^k mask without silently going non-uniform.
+func GenerateMulticastInitialSNs(res Resolution) LaneSNs {
+	mask := res.Mask(FieldFrameSN)
+	var sns LaneSNs
+	for i := range 8 {
+		sns.Reliable[i] = rand.Uint64N(mask + 1)
+		sns.BestEffort[i] = rand.Uint64N(mask + 1)
+	}
+	return sns
 }
 
 // AttachLaneSNs appends the per-lane SN extension (QoS ext, ID=0x01,

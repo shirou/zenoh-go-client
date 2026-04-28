@@ -92,6 +92,30 @@ func TestJoinDecodeLaneSNsAbsent(t *testing.T) {
 	}
 }
 
+// TestGenerateMulticastInitialSNs: every value is masked to the SN
+// resolution and the 16 entries are not all identical (vanishing
+// false-positive odds on 16 random uint64s).
+func TestGenerateMulticastInitialSNs(t *testing.T) {
+	sns := GenerateMulticastInitialSNs(DefaultResolution)
+	mask := DefaultResolution.Mask(FieldFrameSN)
+	allSame := true
+	first := sns.Reliable[0]
+	for i := range 8 {
+		if sns.Reliable[i] > mask {
+			t.Errorf("Reliable[%d]=%#x exceeds mask %#x", i, sns.Reliable[i], mask)
+		}
+		if sns.BestEffort[i] > mask {
+			t.Errorf("BestEffort[%d]=%#x exceeds mask %#x", i, sns.BestEffort[i], mask)
+		}
+		if sns.Reliable[i] != first || sns.BestEffort[i] != first {
+			allSame = false
+		}
+	}
+	if allSame {
+		t.Errorf("all 16 lane SNs identical (%#x); generator likely broken", first)
+	}
+}
+
 // TestJoinDecodeLaneSNsCorrupt: a QoS ZBuf with too few bytes errors.
 func TestJoinDecodeLaneSNsCorrupt(t *testing.T) {
 	j := &Join{

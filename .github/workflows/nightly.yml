@@ -16,7 +16,10 @@ on:
 jobs:
   interop-stress:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Two sequential `go test` steps capped at 10m each = 20m of test
+    # budget; the rest is `make interop-up` (build + image pull) and
+    # general CI overhead.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
@@ -24,7 +27,13 @@ jobs:
           go-version: "1.26"
           check-latest: true
       - run: make interop-up
-      - run: go test -race -tags "interop stress" -count=1 -timeout 15m -v ./tests/interop/... ./tests/stress/...
+      # Run interop and stress as separate `go test` invocations. Running
+      # them in one command lets `go test` execute the two packages in
+      # parallel against the same zenohd, which reliably trips a zenohd
+      # 1.0.0 panic (`Invalid Key Expr "$stressord"`, resource.rs:597)
+      # under concurrent declare/undeclare.
+      - run: go test -race -tags interop -count=1 -timeout 10m -v ./tests/interop/...
+      - run: go test -race -tags "interop stress" -count=1 -timeout 10m -v ./tests/stress/...
       - if: always()
         run: make interop-down
 

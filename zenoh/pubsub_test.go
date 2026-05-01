@@ -759,9 +759,13 @@ func TestSessionGetEmitsRequestExtensions(t *testing.T) {
 		if budget == nil || uint32(budget.Z64) != 32 {
 			t.Errorf("Budget ext = %+v, want 32", budget)
 		}
+		// Wire ext_timeout is the user-requested timeout plus the grace
+		// margin (see getTimeoutWireGrace) so the router's own timeout
+		// cleanup races strictly after our local cancel.
+		wantTimeout := uint64((2500*time.Millisecond + getTimeoutWireGrace).Milliseconds())
 		timeout := codec.FindExt(req.extensions, wire.ReqExtIDTimeout)
-		if timeout == nil || timeout.Z64 != 2500 {
-			t.Errorf("Timeout ext = %+v, want 2500 (ms)", timeout)
+		if timeout == nil || timeout.Z64 != wantTimeout {
+			t.Errorf("Timeout ext = %+v, want %d (ms)", timeout, wantTimeout)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("router did not observe REQUEST within 2s")

@@ -9,6 +9,22 @@ import (
 	"github.com/shirou/zenoh-go-client/internal/wire"
 )
 
+// getTimeoutWireGrace is added to opts.Timeout when emitting the wire
+// Timeout extension on a REQUEST. The local cancel timer still fires at
+// opts.Timeout exactly; the wire value is opts.Timeout + grace so the
+// router's cleanup (which emits a synthetic "Timeout" ERR reply when its
+// ext_timeout expires) typically fires after our local cancel, and the
+// resulting late ERR is dropped by deliverReply's "no such request"
+// path. This is best-effort ordering — a local cancel delayed past the
+// grace by GC or scheduler jitter would let the ERR through — sized so
+// the assumption holds for the wake delays we have measured.
+//
+// 100ms covers goroutine-wake jitter we have observed in CI under
+// -race + CPU pressure (closes lagging the deadline by tens of ms);
+// the cost is that a queryable honouring ext_timeout will keep working
+// for an extra grace period past the user's deadline.
+const getTimeoutWireGrace = 100 * time.Millisecond
+
 // QueryTarget selects which matching queryables receive a Get. Wire values
 // match the spec (query.adoc §QueryTarget Extension).
 type QueryTarget uint8
@@ -88,6 +104,11 @@ type GetOptions struct {
 	// Timeout bounds how long the querier waits for replies. Zero = no
 	// querier-side limit (extension omitted); the router MAY still impose
 	// its own timeout.
+	//
+	// The local reply channel always closes after Timeout. The wire-level
+	// ext_timeout advertised on the REQUEST is set to Timeout + a small
+	// grace margin so a cooperating router's own timeout enforcement
+	// strictly follows our local cancel; see getTimeoutWireGrace.
 	Timeout time.Duration
 
 	// Buffer is the reply-channel capacity; 0 → default 16. Overflow drops
@@ -183,12 +204,24 @@ func (s *Session) GetWithContext(ctx context.Context, keyExpr KeyExpr, opts *Get
 		if opts.Budget > 0 {
 			exts = append(exts, wire.BudgetExt(opts.Budget))
 		}
-		if ms := opts.Timeout.Milliseconds(); ms > 0 {
-			// Sub-millisecond durations would round to 0 and be confused with
-			// "unset", so only emit the Timeout extension when we have at
-			// least 1 ms to carry.
-			exts = append(exts, wire.TimeoutExt(uint64(ms)))
+		if opts.Timeout > 0 {
 			timeout = opts.Timeout
+			if ms := opts.Timeout.Milliseconds(); ms > 0 {
+				// Sub-millisecond durations would round to 0 and be confused
+				// with "unset", so only emit the Timeout extension when we
+				// have at least 1 ms to carry. The local cancel timer above
+				// still fires for sub-ms Timeouts; only the wire hint is
+				// suppressed.
+				//
+				// The wire value is the user-requested timeout plus a grace
+				// margin so the router's own cleanup (zenohd emits a synthetic
+				// "Timeout" ERR reply when its ext_timeout fires) typically
+				// lands after our local timer. Without the margin both sides
+				// race at the same nominal deadline and goroutine-wake jitter
+				// on busy hosts can let the router's ERR slip into the reply
+				// stream before our local cancel closes it.
+				exts = append(exts, wire.TimeoutExt(uint64(ms)+uint64(getTimeoutWireGrace.Milliseconds())))
+			}
 		}
 	}
 	req := &wire.Request{

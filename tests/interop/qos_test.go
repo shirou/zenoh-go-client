@@ -185,8 +185,22 @@ func TestGoPriorityOrderingTendency(t *testing.T) {
 	// while the writer drains. The payload tags which lane the sample came
 	// from because the public Sample type does not currently surface the
 	// QoS extension's priority.
-	hi := &zenoh.PutOptions{Priority: zenoh.PriorityRealTime, HasPriority: true}
-	lo := &zenoh.PutOptions{Priority: zenoh.PriorityBackground, HasPriority: true}
+	//
+	// Block congestion control is required for correctness, not just
+	// ordering: a best-effort burst this size lets zenohd legitimately
+	// drop a sample under load, which would leave the subscriber one
+	// short of total and hang the test. Block makes the whole path
+	// reliable end-to-end so all `total` samples arrive; the sender
+	// still blocks on a full queue, so the batcher coalescing the test
+	// relies on is unaffected.
+	hi := &zenoh.PutOptions{
+		Priority: zenoh.PriorityRealTime, HasPriority: true,
+		CongestionControl: zenoh.CongestionControlBlock, HasCongestion: true,
+	}
+	lo := &zenoh.PutOptions{
+		Priority: zenoh.PriorityBackground, HasPriority: true,
+		CongestionControl: zenoh.CongestionControlBlock, HasCongestion: true,
+	}
 	hiPayload := zenoh.NewZBytesFromString(hiTag)
 	loPayload := zenoh.NewZBytesFromString(loTag)
 	for i := 0; i < perPriority; i++ {

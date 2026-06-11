@@ -185,9 +185,10 @@ func (s *Session) sendUndeclareQueryable(id uint32, keyExpr KeyExpr) error {
 }
 
 // queryableInfoExt builds the QueryableInfo extension (Z64, id=0x01,
-// M=false). Z64 payload layout: bit 0 = Complete; bits 17:1 = distance.
+// M=false). Z64 payload layout: flags in the low byte (bit 0 = Complete),
+// distance in bits 8 and above (zenoh-codec declare.rs, QueryableInfoType).
 func queryableInfoExt(complete bool, distance uint16) codec.Extension {
-	var v uint64 = uint64(distance) << 1
+	var v uint64 = uint64(distance) << 8
 	if complete {
 		v |= 1
 	}

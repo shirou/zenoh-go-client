@@ -13,7 +13,8 @@ const WireExprExtID = 0x0F
 
 // QueryableInfoExtID is the Z64 extension attached to D_QUERYABLE to
 // advertise the queryable's Complete flag and distance. Z64 value layout:
-// bit 0 = Complete, bits 17:1 = distance (0 = local / intra-process).
+// flags in the low byte (bit 0 = Complete), distance in bits 8 and above
+// (0 = local / intra-process).
 const QueryableInfoExtID = 0x01
 
 // Declare is the DECLARE network message (ID 0x1E). Carries exactly one

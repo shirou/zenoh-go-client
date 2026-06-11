@@ -320,14 +320,17 @@ func decodeUndeclareEntity(r *codec.Reader, h codec.Header, kind byte) (*Undecla
 // encodeWireExprExtension builds the WireExpr extension (ID 0x0F, mandatory,
 // ZBuf) carrying the key expression for U_* messages.
 //
-// Extension body layout (spec declarations.adoc §WireExpr Extension):
+// Extension body layout (zenoh-codec/src/network/declare.rs, WireExprType):
 //
 //	 7 6 5 4 3 2 1 0
 //	+-+-+-+-+-+-+-+-+
 //	|X|X|X|X|X|X|M|N|
 //	+-+-+-+-+-+-+-+-+
 //	% key_scope:z16 %
-//	~  key_suffix   ~   if N==1: <u8;z16>
+//	~  key_suffix   ~   if N==1: raw bytes to the end of the ZBuf
+//
+// Unlike the inline WireExpr encoding used elsewhere, the suffix has no
+// length prefix — it is delimited by the enclosing extension ZBuf.
 func encodeWireExprExtension(ke WireExpr) (codec.Extension, error) {
 	body := codec.NewWriter(16)
 	var flags byte
@@ -340,9 +343,7 @@ func encodeWireExprExtension(ke WireExpr) (codec.Extension, error) {
 	body.AppendByte(flags)
 	body.EncodeZ16(ke.Scope)
 	if ke.Named() {
-		if err := body.EncodeStringZ16(ke.Suffix); err != nil {
-			return codec.Extension{}, err
-		}
+		body.AppendBytes([]byte(ke.Suffix))
 	}
 	return codec.Extension{
 		Header: codec.ExtHeader{
@@ -362,7 +363,16 @@ func decodeWireExprExtensionBody(b []byte) (WireExpr, error) {
 	}
 	named := flags&(1<<0) != 0
 	mapping := flags&(1<<1) != 0
-	return DecodeWireExpr(r, named, mapping)
+	scope, err := r.DecodeZ16()
+	if err != nil {
+		return WireExpr{}, err
+	}
+	ke := WireExpr{Scope: scope, Mapping: mapping}
+	if named {
+		// The suffix runs to the end of the extension ZBuf.
+		ke.Suffix = string(r.Bytes())
+	}
+	return ke, nil
 }
 
 // ----- D_FINAL (0x1A) -----

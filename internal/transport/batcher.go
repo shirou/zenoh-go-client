@@ -30,6 +30,11 @@ type OutboundMessage struct {
 type Batcher struct {
 	batchSize int
 	attachQoS bool
+	// snMask bounds every lane sequence number at the negotiated FrameSN
+	// resolution: increments wrap with `& snMask`. A peer hard-errors the
+	// transport when it sees an SN above the resolution it negotiated
+	// (rust common/seq_num.rs precedes() bails on value & !mask != 0).
+	snMask uint64
 	// laneSeeds[priority][reliable] is the starting sequence number for
 	// the lane at first use. Unicast Batchers fill every entry with the
 	// single negotiated initialSN; multicast Batchers carry the 16
@@ -42,11 +47,13 @@ type Batcher struct {
 }
 
 // NewBatcher constructs a Batcher with a single starting sequence number
-// shared by every lane (unicast convention).
-func NewBatcher(batchSize int, attachQoS bool, initialSN uint64, sink BatchSink) *Batcher {
+// shared by every lane (unicast convention). snMask is the negotiated
+// FrameSN mask (wire.Resolution.Mask); 0 means unbounded.
+func NewBatcher(batchSize int, attachQoS bool, initialSN, snMask uint64, sink BatchSink) *Batcher {
 	b := &Batcher{
 		batchSize: batchSize,
 		attachQoS: attachQoS,
+		snMask:    normalizeSNMask(snMask),
 		sink:      sink,
 	}
 	for p := range b.laneSeeds {
@@ -61,13 +68,23 @@ func NewBatcher(batchSize int, attachQoS bool, initialSN uint64, sink BatchSink)
 // the reliable lane — matching the [8][2]*lane layout used internally.
 // Used by the multicast transport, which advertises 16 independent
 // initial SNs in its JOIN.
-func NewBatcherWithLaneSeeds(batchSize int, attachQoS bool, seeds [8][2]uint64, sink BatchSink) *Batcher {
+func NewBatcherWithLaneSeeds(batchSize int, attachQoS bool, seeds [8][2]uint64, snMask uint64, sink BatchSink) *Batcher {
 	return &Batcher{
 		batchSize: batchSize,
 		attachQoS: attachQoS,
 		laneSeeds: seeds,
+		snMask:    normalizeSNMask(snMask),
 		sink:      sink,
 	}
+}
+
+// normalizeSNMask maps the "unset" zero value to the full 64-bit mask so
+// arithmetic can apply it unconditionally.
+func normalizeSNMask(mask uint64) uint64 {
+	if mask == 0 {
+		return ^uint64(0)
+	}
+	return mask
 }
 
 type lane struct {
@@ -152,7 +169,7 @@ func (b *Batcher) fragmentLocked(l *lane, msgBytes []byte) error {
 	// Single buffer reused across every fragment of this Enqueue. The sink
 	// consumes the bytes synchronously so we can reset between iterations.
 	scratch := make([]byte, 0, b.batchSize)
-	f := Fragmenter{MaxBodySize: b.batchSize}
+	f := Fragmenter{MaxBodySize: b.batchSize, SNMask: b.snMask}
 	nextSN, err := f.Fragment(msgBytes, l.reliable, l.seqNum, exts, func(frag *wire.Fragment) error {
 		w := codec.WriterFromSlice(scratch)
 		if err := frag.EncodeTo(w); err != nil {
@@ -232,7 +249,7 @@ func (b *Batcher) flushLocked(l *lane) error {
 		return nil
 	}
 	err := b.sink(l.batch)
-	l.seqNum++
+	l.seqNum = (l.seqNum + 1) & b.snMask
 	l.batch = l.batch[:0]
 	l.bodyStart = 0
 	return err

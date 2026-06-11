@@ -35,13 +35,19 @@ func LanePriorityFromExts(exts []codec.Extension) uint8 {
 //     discards the in-flight reassembly and returns ErrReassemblyTooLarge.
 type Reassembler struct {
 	MaxMessageSize int
-	lanes          map[LaneKey]*reassemblyState
+	// snMask wraps the expected next seq_num at the negotiated FrameSN
+	// resolution, so a peer legitimately wrapping its SN mid-fragmented
+	// message is not misread as a gap.
+	snMask uint64
+	lanes  map[LaneKey]*reassemblyState
 }
 
-// NewReassembler constructs a reassembler with a per-lane byte cap.
-func NewReassembler(maxMessageSize int) *Reassembler {
+// NewReassembler constructs a reassembler with a per-lane byte cap. snMask
+// is the negotiated FrameSN mask (wire.Resolution.Mask); 0 means unbounded.
+func NewReassembler(maxMessageSize int, snMask uint64) *Reassembler {
 	return &Reassembler{
 		MaxMessageSize: maxMessageSize,
+		snMask:         normalizeSNMask(snMask),
 		lanes:          map[LaneKey]*reassemblyState{},
 	}
 }
@@ -88,7 +94,7 @@ func (r *Reassembler) Push(lane LaneKey, seqNum uint64, more bool, body []byte) 
 		return nil, ErrReassemblyTooLarge
 	}
 	st.buf.Write(body)
-	st.expectedSN = seqNum + 1
+	st.expectedSN = (seqNum + 1) & r.snMask
 
 	if more {
 		return nil, nil

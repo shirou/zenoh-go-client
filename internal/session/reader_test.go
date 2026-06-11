@@ -42,7 +42,7 @@ func TestProcessBatchMultipleFramesPerBatch(t *testing.T) {
 
 	var got []uint32
 	cfg := ReaderConfig{
-		Reassembler:    transport.NewReassembler(1 << 20),
+		Reassembler:    transport.NewReassembler(1<<20, 0),
 		Logger:         slog.Default(),
 		LastRecvUnixMs: &atomic.Int64{},
 		Dispatch: func(h codec.Header, r *codec.Reader) error {

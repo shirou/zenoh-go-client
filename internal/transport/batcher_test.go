@@ -15,7 +15,7 @@ type capturedBatch struct {
 func newCapturingBatcher(t *testing.T, batchSize int, attachQoS bool) (*Batcher, *[]capturedBatch) {
 	t.Helper()
 	var captured []capturedBatch
-	b := NewBatcher(batchSize, attachQoS, 100, func(batch []byte) error {
+	b := NewBatcher(batchSize, attachQoS, 100, 0, func(batch []byte) error {
 		captured = append(captured, capturedBatch{bytes: bytes.Clone(batch)})
 		return nil
 	})
@@ -111,6 +111,34 @@ func TestBatcherIdleFlushEmitsNothing(t *testing.T) {
 	sn2 := mustReadFrameSN(t, (*out)[1].bytes)
 	if sn2 != sn1+1 {
 		t.Errorf("seq_num: %d then %d, want increment by exactly 1", sn1, sn2)
+	}
+}
+
+// TestBatcherSeqNumWrapsAtMask: lane SNs wrap at the negotiated FrameSN
+// resolution instead of growing past it (the peer rejects SNs above the
+// mask it negotiated).
+func TestBatcherSeqNumWrapsAtMask(t *testing.T) {
+	const mask = uint64(1)<<28 - 1 // default 28-bit FrameSN resolution
+	var captured []capturedBatch
+	b := NewBatcher(256, true, mask, mask, func(batch []byte) error {
+		captured = append(captured, capturedBatch{bytes: bytes.Clone(batch)})
+		return nil
+	})
+
+	body := []byte{0x01}
+	_ = b.Enqueue(&OutboundMessage{Encoded: body, Priority: wire.QoSPriorityData, Reliable: true})
+	_ = b.FlushAll()
+	_ = b.Enqueue(&OutboundMessage{Encoded: body, Priority: wire.QoSPriorityData, Reliable: true})
+	_ = b.FlushAll()
+
+	if len(captured) != 2 {
+		t.Fatalf("expected 2 flushes, got %d", len(captured))
+	}
+	if sn := mustReadFrameSN(t, captured[0].bytes); sn != mask {
+		t.Errorf("first seq_num = %d, want %d", sn, mask)
+	}
+	if sn := mustReadFrameSN(t, captured[1].bytes); sn != 0 {
+		t.Errorf("second seq_num = %d, want wrap to 0", sn)
 	}
 }
 

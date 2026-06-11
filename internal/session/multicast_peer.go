@@ -196,6 +196,7 @@ type MulticastRuntime struct {
 	selfZID    wire.ZenohID
 	dispatch   MulticastInboundDispatch
 	maxMsgSz   int
+	snMask     uint64
 	dropped    atomic.Uint64
 	linkClosed chan struct{}
 	writerDone chan struct{}
@@ -281,7 +282,8 @@ func (s *Session) StartMulticastPeer(cfg MulticastConfig) (*MulticastRuntime, er
 
 	ctx, cancel := context.WithCancel(context.Background())
 	seeds := laneSeedsFromSNs(cfg.InitialSNs)
-	batcher := transport.NewBatcherWithLaneSeeds(int(cfg.BatchSize), true /* attachQoS */, seeds, cfg.Link.WriteBatch)
+	snMask := cfg.Resolution.Mask(wire.FieldFrameSN)
+	batcher := transport.NewBatcherWithLaneSeeds(int(cfg.BatchSize), true /* attachQoS */, seeds, snMask, cfg.Link.WriteBatch)
 	rt := &MulticastRuntime{
 		link:       cfg.Link,
 		table:      NewMulticastPeerTable(),
@@ -292,6 +294,7 @@ func (s *Session) StartMulticastPeer(cfg MulticastConfig) (*MulticastRuntime, er
 		selfZID:    cfg.ZID,
 		dispatch:   cfg.Dispatch,
 		maxMsgSz:   cfg.MaxMsgSz,
+		snMask:     snMask,
 		linkClosed: make(chan struct{}),
 		writerDone: make(chan struct{}),
 	}
@@ -477,7 +480,7 @@ func (rt *MulticastRuntime) pushFragment(entry *MulticastPeerEntry, lane transpo
 	entry.reasmMu.Lock()
 	defer entry.reasmMu.Unlock()
 	if entry.reasm == nil {
-		entry.reasm = transport.NewReassembler(rt.maxMsgSz)
+		entry.reasm = transport.NewReassembler(rt.maxMsgSz, rt.snMask)
 	}
 	complete, err := entry.reasm.Push(lane, sn, more, body)
 	if err != nil {

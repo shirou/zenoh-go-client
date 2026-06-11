@@ -10,6 +10,7 @@ import (
 	"github.com/shirou/zenoh-go-client/internal/codec"
 	"github.com/shirou/zenoh-go-client/internal/locator"
 	"github.com/shirou/zenoh-go-client/internal/transport"
+	"github.com/shirou/zenoh-go-client/internal/wire"
 )
 
 // RunConfig bundles everything Session.Run needs to start the per-runtime
@@ -201,12 +202,14 @@ func (s *Session) Run(cfg RunConfig) (*Runtime, error) {
 	peerClose := make(chan uint8, 1)
 	linkClosed := make(chan struct{})
 	lastRecv := new(atomic.Int64)
-	reasm := transport.NewReassembler(cfg.MaxMsgSz)
+	snMask := cfg.Result.NegotiatedResolution.Mask(wire.FieldFrameSN)
+	reasm := transport.NewReassembler(cfg.MaxMsgSz, snMask)
 
 	batcher := transport.NewBatcher(
 		int(cfg.Result.NegotiatedBatchSize),
 		cfg.Result.QoSEnabled,
 		cfg.Result.MyInitialSN,
+		snMask,
 		cfg.Link.WriteBatch,
 	)
 

@@ -19,7 +19,7 @@ func TestFragmentReassembleRoundtrip(t *testing.T) {
 	}
 
 	frag := &Fragmenter{MaxBodySize: 512}
-	reassembler := NewReassembler(1 << 20)
+	reassembler := NewReassembler(1<<20, 0)
 	lane := LaneKey{Priority: uint8(wire.QoSPriorityData), Reliable: true}
 
 	var completed []byte
@@ -73,7 +73,7 @@ func TestFragmentSingleChunk(t *testing.T) {
 // TestReassemblerSNGap: inject a fragment with a skipped seq_num. The
 // reassembler must discard the in-flight state and return ErrReassemblySNGap.
 func TestReassemblerSNGap(t *testing.T) {
-	r := NewReassembler(1 << 20)
+	r := NewReassembler(1<<20, 0)
 	lane := LaneKey{Priority: 5, Reliable: true}
 
 	_, _ = r.Push(lane, 10, true, []byte("aaa"))
@@ -92,10 +92,30 @@ func TestReassemblerSNGap(t *testing.T) {
 	}
 }
 
+// TestReassemblerSNWrapsAtMask: a peer whose lane SN legitimately wraps at
+// the negotiated resolution mid-fragmented-message must not be misread as
+// a gap.
+func TestReassemblerSNWrapsAtMask(t *testing.T) {
+	const mask = uint64(1)<<28 - 1
+	r := NewReassembler(1<<20, mask)
+	lane := LaneKey{Priority: 5, Reliable: true}
+
+	if _, err := r.Push(lane, mask, true, []byte("aaa")); err != nil {
+		t.Fatal(err)
+	}
+	out, err := r.Push(lane, 0, false, []byte("bbb")) // wrapped SN
+	if err != nil {
+		t.Fatalf("wrapped-SN push: %v", err)
+	}
+	if string(out) != "aaabbb" {
+		t.Errorf("body = %q, want aaabbb", out)
+	}
+}
+
 // TestReassemblerTooLarge: accumulated fragments exceeding MaxMessageSize
 // are rejected.
 func TestReassemblerTooLarge(t *testing.T) {
-	r := NewReassembler(4) // very small cap
+	r := NewReassembler(4, 0) // very small cap
 	lane := LaneKey{Priority: 5, Reliable: false}
 
 	_, _ = r.Push(lane, 1, true, []byte("abc"))
@@ -108,7 +128,7 @@ func TestReassemblerTooLarge(t *testing.T) {
 // TestReassemblerLanesIndependent: two lanes accumulate in parallel without
 // interfering.
 func TestReassemblerLanesIndependent(t *testing.T) {
-	r := NewReassembler(1024)
+	r := NewReassembler(1024, 0)
 	laneA := LaneKey{Priority: 5, Reliable: true}
 	laneB := LaneKey{Priority: 3, Reliable: false}
 
@@ -140,7 +160,7 @@ func TestReassemblerLanesIndependent(t *testing.T) {
 // economically in a unit test.
 func TestReassemblerCapBoundary(t *testing.T) {
 	const limit = 1 << 20
-	r := NewReassembler(limit)
+	r := NewReassembler(limit, 0)
 	lane := LaneKey{Priority: 5, Reliable: true}
 
 	body := make([]byte, limit)
@@ -155,7 +175,7 @@ func TestReassemblerCapBoundary(t *testing.T) {
 // TestReassemblerClearResets: Clear drops in-flight state, after which a
 // fresh fragment opens a new reassembly from scratch.
 func TestReassemblerClearResets(t *testing.T) {
-	r := NewReassembler(1024)
+	r := NewReassembler(1024, 0)
 	lane := LaneKey{Priority: 5, Reliable: true}
 	_, _ = r.Push(lane, 10, true, []byte("stale"))
 	r.Clear(lane)

@@ -41,10 +41,11 @@ type HandshakeResult struct {
 	PeerWhatAmI          wire.WhatAmI
 	NegotiatedBatchSize  uint16
 	NegotiatedResolution wire.Resolution
-	// MyLeaseMillis / PeerLeaseMillis: each side proposes its own lease.
-	// Local keepalive cadence is derived from PeerLeaseMillis (we must send
-	// within peer's lease); lease-watchdog uses MyLeaseMillis (peer must
-	// send within ours).
+	// MyLeaseMillis / PeerLeaseMillis: each side announces its own lease —
+	// a commitment to transmit within it. Local keepalive cadence is
+	// derived from MyLeaseMillis (we must send within the lease we
+	// announced); the lease-watchdog uses PeerLeaseMillis (the peer
+	// promised to send within its own lease).
 	MyLeaseMillis   uint64
 	PeerLeaseMillis uint64
 	MyInitialSN     uint64

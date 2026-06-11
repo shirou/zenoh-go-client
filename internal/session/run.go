@@ -249,15 +249,19 @@ func (s *Session) Run(cfg RunConfig) (*Runtime, error) {
 		writerLoop(outQ, batcher, cfg.Link, rt.stop, rt.drain, rt.writerDone, s.logger)
 	})
 
-	if cfg.Result.PeerLeaseMillis > 0 {
+	// A lease is the announcer's commitment to transmit: we must send within
+	// the lease *we* announced, and may expire the peer only after the lease
+	// *it* announced (rust transport.rs: keep_alive from own lease, start_rx
+	// from other_lease).
+	if cfg.Result.MyLeaseMillis > 0 {
 		wg.Go(func() {
-			keepaliveLoop(outQ, cfg.Result.PeerLeaseMillis, cfg.KeepAlive, rt.stop, s.logger)
+			keepaliveLoop(outQ, cfg.Result.MyLeaseMillis, cfg.KeepAlive, rt.stop, s.logger)
 		})
 	}
 
-	if cfg.Result.MyLeaseMillis > 0 {
+	if cfg.Result.PeerLeaseMillis > 0 {
 		wg.Go(func() {
-			leaseWatchdog(lastRecv, cfg.Result.MyLeaseMillis, rt.stop, rt.Shutdown, s.logger)
+			leaseWatchdog(lastRecv, cfg.Result.PeerLeaseMillis, rt.stop, rt.Shutdown, s.logger)
 		})
 	}
 

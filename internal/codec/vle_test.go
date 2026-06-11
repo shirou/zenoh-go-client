@@ -6,7 +6,8 @@ import (
 	"testing"
 )
 
-// Golden vectors from repo/zenoh-spec/docs/modules/wire/pages/primitives.adoc.
+// Golden vectors matching the reference codec (zenoh-codec/src/core/zint.rs):
+// LEB128 capped at 9 bytes, with the 9th byte carrying 8 raw payload bits.
 var vleGolden = []struct {
 	v        uint64
 	expected []byte
@@ -19,7 +20,18 @@ var vleGolden = []struct {
 	{16383, []byte{0xFF, 0x7F}},
 	{16384, []byte{0x80, 0x80, 0x01}},
 	{0xFFFFFFFF, []byte{0xFF, 0xFF, 0xFF, 0xFF, 0x0F}},
-	{0xFFFFFFFFFFFFFFFF, []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01}},
+	// 2^56-1: largest value that fits in 8 bytes.
+	{0x00FFFFFFFFFFFFFF, []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F}},
+	// 2^56: first value needing the 9th byte.
+	{0x0100000000000000, []byte{0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01}},
+	// 2^63-1: bit 7 of the 9th byte still clear.
+	{0x7FFFFFFFFFFFFFFF, []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F}},
+	// 2^63: bit 7 of the 9th byte is payload (bit 63), not continuation.
+	{0x8000000000000000, []byte{0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80}},
+	// An NTP64 timestamp (seconds since 1900 in the upper 32 bits) always
+	// has bit 63 set in the current era; this shape must round-trip.
+	{0xEDA1C2B300000000, []byte{0x80, 0x80, 0x80, 0x80, 0xB0, 0xD6, 0xF0, 0xD0, 0xED}},
+	{0xFFFFFFFFFFFFFFFF, []byte{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}},
 }
 
 func TestEncodeZ64Golden(t *testing.T) {
@@ -74,11 +86,19 @@ func TestDecodeZ16Overflow(t *testing.T) {
 	}
 }
 
-func TestDecodeZ64OverlongRejected(t *testing.T) {
-	// 11 bytes all with continuation bit set (the 11th would be too many for z64).
-	r := NewReader([]byte{0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01})
-	if _, err := r.DecodeZ64(); !errors.Is(err, ErrOverflow) {
-		t.Errorf("expected ErrOverflow on overlong z64, got %v", err)
+func TestDecodeZ64NinthByteTerminates(t *testing.T) {
+	// The 9th byte is consumed raw — even with bit 7 set it terminates the
+	// zint, and any following byte belongs to the next field.
+	r := NewReader([]byte{0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01})
+	v, err := r.DecodeZ64()
+	if err != nil {
+		t.Fatalf("DecodeZ64: %v", err)
+	}
+	if v != 1<<63 {
+		t.Errorf("DecodeZ64 = %#x, want %#x", v, uint64(1)<<63)
+	}
+	if r.Len() != 1 {
+		t.Errorf("expected 1 trailing byte left unread, got %d", r.Len())
 	}
 }
 

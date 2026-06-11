@@ -69,6 +69,19 @@ func TestResolutionDefault(t *testing.T) {
 	}
 }
 
+func TestMinResolutionPerField(t *testing.T) {
+	// Each field negotiates independently: (FSN=1-byte, RID=9-byte) vs
+	// (FSN=4-byte, RID=4-byte) must yield (FSN=1-byte, RID=4-byte) — not
+	// either input byte wholesale.
+	a := NewResolution(0b00, 0b11)
+	b := NewResolution(0b10, 0b10)
+	got := MinResolution(a, b)
+	if got.Code(FieldFrameSN) != 0b00 || got.Code(FieldRequestID) != 0b10 {
+		t.Errorf("MinResolution = FSN %#b / RID %#b, want 0b00 / 0b10",
+			got.Code(FieldFrameSN), got.Code(FieldRequestID))
+	}
+}
+
 func TestResolutionCustom(t *testing.T) {
 	// FSN=2-byte VLE (code 0b01), RID=1-byte VLE (code 0b00)
 	res := NewResolution(0b01, 0b00)

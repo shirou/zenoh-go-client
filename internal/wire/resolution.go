@@ -64,3 +64,17 @@ func (r Resolution) Mask(f Field) uint64 {
 func NewResolution(fsnCode, ridCode uint8) Resolution {
 	return Resolution((ridCode&0b11)<<2 | (fsnCode & 0b11))
 }
+
+// Code returns the raw 2-bit width code of the selected field.
+func (r Resolution) Code(f Field) uint8 { return uint8(r>>(2*f)) & 0b11 }
+
+// MinResolution negotiates each field independently, taking the smaller
+// width code per field (rust establishment/accept.rs computes the per-field
+// minimum; a whole-byte comparison could adopt a RequestID width one side
+// never offered).
+func MinResolution(a, b Resolution) Resolution {
+	return NewResolution(
+		min(a.Code(FieldFrameSN), b.Code(FieldFrameSN)),
+		min(a.Code(FieldRequestID), b.Code(FieldRequestID)),
+	)
+}

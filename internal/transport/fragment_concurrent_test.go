@@ -74,7 +74,7 @@ func TestReassemblerInterleavedLanes(t *testing.T) {
 		}
 	}
 
-	r := NewReassembler(payloadSize * reasmCapMult)
+	r := NewReassembler(payloadSize*reasmCapMult, 0)
 	got := make(map[uint8][]byte)
 	for _, e := range events {
 		more := e.idx < len(e.plan.frags)-1
@@ -134,7 +134,7 @@ func TestBatcherConcurrentLargePayloads(t *testing.T) {
 
 	var mu sync.Mutex
 	var batches [][]byte
-	b := NewBatcher(batchSize, true, 0, func(batch []byte) error {
+	b := NewBatcher(batchSize, true, 0, 0, func(batch []byte) error {
 		mu.Lock()
 		defer mu.Unlock()
 		batches = append(batches, bytes.Clone(batch))
@@ -157,7 +157,7 @@ func TestBatcherConcurrentLargePayloads(t *testing.T) {
 	}
 	wg.Wait()
 
-	r := NewReassembler(payloadSize * 2)
+	r := NewReassembler(payloadSize*2, 0)
 	completed := make(map[uint8][]byte)
 	for _, batch := range batches {
 		rd := codec.NewReader(batch)

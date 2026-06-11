@@ -41,10 +41,11 @@ type HandshakeResult struct {
 	PeerWhatAmI          wire.WhatAmI
 	NegotiatedBatchSize  uint16
 	NegotiatedResolution wire.Resolution
-	// MyLeaseMillis / PeerLeaseMillis: each side proposes its own lease.
-	// Local keepalive cadence is derived from PeerLeaseMillis (we must send
-	// within peer's lease); lease-watchdog uses MyLeaseMillis (peer must
-	// send within ours).
+	// MyLeaseMillis / PeerLeaseMillis: each side announces its own lease —
+	// a commitment to transmit within it. Local keepalive cadence is
+	// derived from MyLeaseMillis (we must send within the lease we
+	// announced); the lease-watchdog uses PeerLeaseMillis (the peer
+	// promised to send within its own lease).
 	MyLeaseMillis   uint64
 	PeerLeaseMillis uint64
 	MyInitialSN     uint64
@@ -107,14 +108,24 @@ func DoHandshake(link transport.Link, cfg HandshakeConfig) (*HandshakeResult, er
 		return nil, &CloseReasonErr{Reason: CloseReasonConnectionToSelf}
 	}
 
-	// Negotiate: batch_size = min(proposed, peer's), resolution may be
-	// lowered by responder (we accept whatever they return).
+	// Negotiate: batch_size = min(proposed, peer's). The responder may
+	// lower the resolution per field but never raise it — a non-conforming
+	// ack above our proposal must fail the handshake, or our SN mask would
+	// exceed what we offered (rust establishment/open.rs closes with
+	// INVALID in that case).
 	negBatch := cfg.BatchSize
 	if initAck.HasSizeInfo && initAck.BatchSize < negBatch {
 		negBatch = initAck.BatchSize
 	}
 	negResolution := cfg.Resolution
 	if initAck.HasSizeInfo {
+		for _, f := range []wire.Field{wire.FieldFrameSN, wire.FieldRequestID} {
+			if initAck.Resolution.Code(f) > cfg.Resolution.Code(f) {
+				_ = sendClose(link, CloseReasonInvalid)
+				return nil, fmt.Errorf("handshake: peer raised resolution field %d to code %d (offered %d)",
+					f, initAck.Resolution.Code(f), cfg.Resolution.Code(f))
+			}
+		}
 		negResolution = initAck.Resolution
 	}
 

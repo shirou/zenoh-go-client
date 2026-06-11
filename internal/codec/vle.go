@@ -4,37 +4,41 @@ import "math/bits"
 
 // Variable-length encoding used throughout the Zenoh wire format.
 //
-// Encoding: little-endian base-128 (LEB128). Each byte carries 7 payload
-// bits; bit 7 is the continuation flag (1 = more bytes follow). The decoder
-// bounds the maximum number of bytes per width so that malformed overlong
-// encodings are rejected.
-//
-// Spec: repo/zenoh-spec/docs/modules/wire/pages/primitives.adoc §VLE.
+// Encoding: little-endian base-128 (LEB128) capped at 9 bytes. Each byte
+// carries 7 payload bits; bit 7 is the continuation flag (1 = more bytes
+// follow) — except the 9th byte, which carries the remaining 8 bits raw
+// with no continuation semantics. This is NOT plain LEB128: a full uint64
+// occupies 9 bytes, never 10, and bit 7 of the 9th byte is payload (bit 63
+// of the value). The reference codec is zenoh-codec/src/core/zint.rs.
+// The decoder bounds the maximum number of bytes per width so that
+// malformed overlong encodings are rejected.
 //
 // Maximum byte counts per width:
 //
 //	z8  → 1–2 bytes (covers 0..255)
 //	z16 → 1–3 bytes (covers 0..65535)
 //	z32 → 1–5 bytes (covers 0..2^32-1)
-//	z64 → 1–10 bytes (covers 0..2^64-1)
+//	z64 → 1–9 bytes (covers 0..2^64-1)
 const (
 	maxZ8Bytes  = 2
 	maxZ16Bytes = 3
 	maxZ32Bytes = 5
-	maxZ64Bytes = 10
+	maxZ64Bytes = 9
 )
 
 // EncodeZ64 writes v as a VLE integer. Accepts any unsigned width up to 64 bit.
 func (w *Writer) EncodeZ64(v uint64) {
-	for {
-		b := byte(v & 0x7f)
-		v >>= 7
-		if v == 0 {
-			w.buf = append(w.buf, b)
+	for range maxZ64Bytes - 1 {
+		if v < 0x80 {
+			w.buf = append(w.buf, byte(v))
 			return
 		}
-		w.buf = append(w.buf, b|0x80)
+		w.buf = append(w.buf, byte(v)|0x80)
+		v >>= 7
 	}
+	// 9th byte: the remaining 8 bits go out raw. For values >= 2^63 bit 7
+	// is set but it is payload, not a continuation flag.
+	w.buf = append(w.buf, byte(v))
 }
 
 // EncodeZ32 writes v as a VLE integer at most 5 bytes long.
@@ -54,6 +58,12 @@ func decodeVLE(r *Reader, maxBytes int) (uint64, error) {
 		b, err := r.ReadByte()
 		if err != nil {
 			return 0, err
+		}
+		// At full uint64 width, the 9th byte carries all 8 remaining bits
+		// raw; bit 7 is payload (bit 63), not a continuation flag.
+		if i == maxZ64Bytes-1 {
+			value |= uint64(b) << shift
+			return value, nil
 		}
 		// The last allowed byte must not have the continuation bit set.
 		// This rejects encodings that would overflow the target width.
@@ -114,11 +124,16 @@ func (r *Reader) DecodeZ8() (uint8, error) {
 // space ahead of time, e.g. for outer length prefixes.
 //
 // Implementation: one bit-scan (bits.Len64) determines the MSB position;
-// divide by 7 (rounded up) and clamp to at least one byte.
+// divide by 7 (rounded up), clamp to at least one byte and to the 9-byte
+// cap (the 9th byte carries 8 raw bits, so 64-bit values never need 10).
 func SizeZ64(v uint64) int {
 	b := bits.Len64(v)
 	if b == 0 {
 		return 1
 	}
-	return (b + 6) / 7
+	n := (b + 6) / 7
+	if n > maxZ64Bytes {
+		n = maxZ64Bytes
+	}
+	return n
 }

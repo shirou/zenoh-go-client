@@ -53,6 +53,15 @@ const (
 	IDDataErr   byte = 0x05
 )
 
+// IsNetworkMessageID reports whether id (the low 5 header bits) is a
+// network-layer message. Network and transport IDs occupy disjoint ranges,
+// which is how a reader finds the end of a FRAME body inside a batch: the
+// first header byte that is not a network message starts the next transport
+// message.
+func IsNetworkMessageID(id byte) bool {
+	return id >= IDNetworkInterest && id <= IDNetworkOAM
+}
+
 // Scouting message IDs (scouting.adoc). These live in their own ID space
 // because scouting runs outside the transport/network layers.
 const (

@@ -40,12 +40,12 @@ type LinkInfo struct {
 	// when that becomes necessary.
 	NegotiatedResolution uint8
 
-	// LocalLeaseMillis is the lease we announced; the peer must KEEPALIVE
-	// within this window or we tear the link down.
+	// LocalLeaseMillis is the lease we announced; we must KEEPALIVE within
+	// this window or the peer may tear the link down.
 	LocalLeaseMillis uint64
 
-	// PeerLeaseMillis is the lease the peer announced; we must KEEPALIVE
-	// within this window to keep the link up.
+	// PeerLeaseMillis is the lease the peer announced; if the peer stays
+	// silent past this window we tear the link down.
 	PeerLeaseMillis uint64
 
 	// QoSEnabled reports whether 16-lane QoS was negotiated. False means the

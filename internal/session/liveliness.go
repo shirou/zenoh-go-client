@@ -169,11 +169,18 @@ func (s *Session) RegisterLivelinessQuery(interestID uint32, bufferSize int) <-c
 	return e.replies
 }
 
+// deliverLivelinessReply pushes one event onto the query's channel.
+//
+// The read lock is held across the send so finaliseLivelinessQuery (which
+// closes the channel under the write lock) can never run concurrently with
+// it — otherwise the non-blocking send races with close(replies) and can
+// panic with "send on closed channel" whenever a liveliness Get is
+// cancelled while a token arrives. Same discipline as get_collector.go.
 func (s *Session) deliverLivelinessReply(interestID uint32, ev LivelinessEvent) {
 	reg := s.regLivelinessQueries()
 	reg.mu.RLock()
+	defer reg.mu.RUnlock()
 	e, ok := reg.byID[interestID]
-	reg.mu.RUnlock()
 	if !ok {
 		return
 	}
@@ -186,14 +193,18 @@ func (s *Session) deliverLivelinessReply(interestID uint32, ev LivelinessEvent) 
 
 // finaliseLivelinessQuery closes the query's channel and removes it.
 // Called on D_FINAL and on CancelLivelinessQuery.
+//
+// close(replies) runs while the write lock is held, mutually exclusive
+// with any in-flight deliverLivelinessReply. closeOnce guards against
+// double-close from racing finalise callers.
 func (s *Session) finaliseLivelinessQuery(interestID uint32) {
 	reg := s.regLivelinessQueries()
 	reg.mu.Lock()
+	defer reg.mu.Unlock()
 	e, ok := reg.byID[interestID]
 	if ok {
 		delete(reg.byID, interestID)
 	}
-	reg.mu.Unlock()
 	if e != nil {
 		e.closeOnce.Do(func() { close(e.replies) })
 	}

@@ -23,6 +23,9 @@ type Fragmenter struct {
 	// the header + seq_num + extension overhead). Callers derive it from
 	// the negotiated batch_size minus per-message overhead.
 	MaxBodySize int
+	// SNMask wraps each per-fragment sequence number at the negotiated
+	// FrameSN resolution. 0 means unbounded (full 64-bit).
+	SNMask uint64
 }
 
 // fragmentOverhead budgets for: header byte + z64 seq_num (up to 10 bytes) +
@@ -35,11 +38,13 @@ const fragmentOverhead = 16
 // attached to every emitted fragment (typically the per-lane QoS Z64
 // extension so the receiver can route to the right reassembly lane).
 //
-// Returns the next-available seq_num (i.e. seqNumStart + number of fragments).
+// Returns the next-available seq_num (seqNumStart advanced by the number of
+// fragments, wrapped at SNMask).
 func (f *Fragmenter) Fragment(msgBytes []byte, reliable bool, seqNumStart uint64, exts []codec.Extension, sink FragmentSink) (uint64, error) {
 	if f.MaxBodySize <= fragmentOverhead {
 		return seqNumStart, fmt.Errorf("fragmenter: MaxBodySize %d too small (need > %d)", f.MaxBodySize, fragmentOverhead)
 	}
+	mask := normalizeSNMask(f.SNMask)
 	chunk := f.MaxBodySize - fragmentOverhead
 	sn := seqNumStart
 	for len(msgBytes) > 0 {
@@ -56,7 +61,7 @@ func (f *Fragmenter) Fragment(msgBytes []byte, reliable bool, seqNumStart uint64
 			return sn, err
 		}
 		msgBytes = msgBytes[n:]
-		sn++
+		sn = (sn + 1) & mask
 	}
 	return sn, nil
 }

@@ -180,7 +180,8 @@ func TestFrameRoundtrip(t *testing.T) {
 	if got.SeqNum != 12345 || !got.Reliable {
 		t.Errorf("Frame mismatch: %+v", got)
 	}
-	if !bytes.Equal(got.Body, payload) {
+	// DecodeFrame leaves the body in the reader for the caller to iterate.
+	if !bytes.Equal(r.Bytes(), payload) {
 		t.Errorf("body mismatch")
 	}
 }
@@ -331,8 +332,8 @@ func TestFrameFlagVariants(t *testing.T) {
 							if got.SeqNum != orig.SeqNum {
 								t.Errorf("SeqNum = %d, want %d", got.SeqNum, orig.SeqNum)
 							}
-							if !bytes.Equal(got.Body, orig.Body) {
-								t.Errorf("body = % x, want % x", got.Body, orig.Body)
+							if !bytes.Equal(r.Bytes(), orig.Body) {
+								t.Errorf("body = % x, want % x", r.Bytes(), orig.Body)
 							}
 							if len(got.Extensions) != 1 {
 								t.Fatalf("extensions = %d, want 1", len(got.Extensions))
@@ -383,7 +384,7 @@ func TestFrameNoExtensions(t *testing.T) {
 			t.Errorf("R=%v: got Reliable=%v extensions=%d, want %v/0",
 				reliable, got.Reliable, len(got.Extensions), reliable)
 		}
-		if !bytes.Equal(got.Body, orig.Body) {
+		if !bytes.Equal(r.Bytes(), orig.Body) {
 			t.Errorf("R=%v: body mismatch", reliable)
 		}
 	}

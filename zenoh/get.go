@@ -25,6 +25,26 @@ import (
 // for an extra grace period past the user's deadline.
 const getTimeoutWireGrace = 100 * time.Millisecond
 
+// defaultQueryTimeout is applied when a Get's Timeout is left zero,
+// mirroring the reference's queries_default_timeout
+// (DEFAULT_CONFIG.json5: 10000 ms). Without it, a queryable that never
+// sends RESPONSE_FINAL leaks the Get — the reply channel never closes
+// and a ranging consumer deadlocks.
+const defaultQueryTimeout = 10 * time.Second
+
+// effectiveQueryTimeout resolves the Timeout convention shared by Get,
+// Querier, and Liveliness Get: 0 → default, negative → no limit.
+func effectiveQueryTimeout(t time.Duration) time.Duration {
+	switch {
+	case t > 0:
+		return t
+	case t < 0:
+		return 0
+	default:
+		return defaultQueryTimeout
+	}
+}
+
 // QueryTarget selects which matching queryables receive a Get. Wire values
 // match the spec (query.adoc §QueryTarget Extension).
 type QueryTarget uint8
@@ -101,9 +121,11 @@ type GetOptions struct {
 	// Spec calls for a non-zero u32.
 	Budget uint32
 
-	// Timeout bounds how long the querier waits for replies. Zero = no
-	// querier-side limit (extension omitted); the router MAY still impose
-	// its own timeout.
+	// Timeout bounds how long the querier waits for replies. Zero = the
+	// 10 s default (mirroring the reference's queries_default_timeout) so
+	// a queryable that never finalises cannot leak the Get forever; pass
+	// a negative value for no querier-side limit. The router MAY still
+	// impose its own timeout.
 	//
 	// The local reply channel always closes after Timeout. The wire-level
 	// ext_timeout advertised on the REQUEST is set to Timeout + a small
@@ -191,7 +213,7 @@ func (s *Session) GetWithContext(ctx context.Context, keyExpr KeyExpr, opts *Get
 	// Build and send REQUEST.
 	body := &wire.QueryBody{}
 	var exts []codec.Extension
-	var timeout time.Duration
+	var optTimeout time.Duration
 	if opts != nil {
 		if opts.HasConsolidation {
 			cm := wire.ConsolidationMode(opts.Consolidation)
@@ -204,24 +226,25 @@ func (s *Session) GetWithContext(ctx context.Context, keyExpr KeyExpr, opts *Get
 		if opts.Budget > 0 {
 			exts = append(exts, wire.BudgetExt(opts.Budget))
 		}
-		if opts.Timeout > 0 {
-			timeout = opts.Timeout
-			if ms := opts.Timeout.Milliseconds(); ms > 0 {
-				// Sub-millisecond durations would round to 0 and be confused
-				// with "unset", so only emit the Timeout extension when we
-				// have at least 1 ms to carry. The local cancel timer above
-				// still fires for sub-ms Timeouts; only the wire hint is
-				// suppressed.
-				//
-				// The wire value is the user-requested timeout plus a grace
-				// margin so the router's own cleanup (zenohd emits a synthetic
-				// "Timeout" ERR reply when its ext_timeout fires) typically
-				// lands after our local timer. Without the margin both sides
-				// race at the same nominal deadline and goroutine-wake jitter
-				// on busy hosts can let the router's ERR slip into the reply
-				// stream before our local cancel closes it.
-				exts = append(exts, wire.TimeoutExt(uint64(ms)+uint64(getTimeoutWireGrace.Milliseconds())))
-			}
+		optTimeout = opts.Timeout
+	}
+	timeout := effectiveQueryTimeout(optTimeout)
+	if timeout > 0 {
+		if ms := timeout.Milliseconds(); ms > 0 {
+			// Sub-millisecond durations would round to 0 and be confused
+			// with "unset", so only emit the Timeout extension when we
+			// have at least 1 ms to carry. The local cancel timer above
+			// still fires for sub-ms Timeouts; only the wire hint is
+			// suppressed.
+			//
+			// The wire value is the user-requested timeout plus a grace
+			// margin so the router's own cleanup (zenohd emits a synthetic
+			// "Timeout" ERR reply when its ext_timeout fires) typically
+			// lands after our local timer. Without the margin both sides
+			// race at the same nominal deadline and goroutine-wake jitter
+			// on busy hosts can let the router's ERR slip into the reply
+			// stream before our local cancel closes it.
+			exts = append(exts, wire.TimeoutExt(uint64(ms)+uint64(getTimeoutWireGrace.Milliseconds())))
 		}
 	}
 	req := &wire.Request{

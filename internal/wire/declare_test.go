@@ -1,6 +1,7 @@
 package wire
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/shirou/zenoh-go-client/internal/codec"
@@ -82,6 +83,27 @@ func TestUndeclareSubscriberCarriesWireExpr(t *testing.T) {
 	}
 	if body.WireExpr.Suffix != "demo/**" {
 		t.Errorf("WireExpr suffix lost: %+v", body.WireExpr)
+	}
+}
+
+func TestWireExprExtensionBodyLayout(t *testing.T) {
+	// The suffix inside the WireExpr extension is raw bytes delimited by
+	// the extension ZBuf — no length prefix (zenoh-codec declare.rs,
+	// WireExprType codec).
+	ext, err := encodeWireExprExtension(WireExpr{Scope: 0, Suffix: "demo/**"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := append([]byte{0x01, 0x00}, []byte("demo/**")...) // flags(N=1), scope, raw suffix
+	if !bytes.Equal(ext.ZBuf, want) {
+		t.Errorf("ext body = % x, want % x", ext.ZBuf, want)
+	}
+	ke, err := decodeWireExprExtensionBody(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ke.Suffix != "demo/**" || ke.Scope != 0 || ke.Mapping {
+		t.Errorf("decoded = %+v", ke)
 	}
 }
 

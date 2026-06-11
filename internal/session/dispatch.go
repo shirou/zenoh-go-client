@@ -61,17 +61,27 @@ func (s *Session) NetworkDispatcherForPeer(peerZID wire.ZenohID) InboundDispatch
 	}
 }
 
-// onRequest routes an inbound REQUEST to every matching queryable.
+// onRequest routes an inbound REQUEST to every matching queryable. A
+// request that reaches no queryable is finalised immediately so the remote
+// querier completes instead of waiting for its timeout (rust session.rs
+// handle_query drops the Query right away, which sends the final).
 func (s *Session) onRequest(req *wire.Request) error {
 	full, ok := s.resolveRemoteKey(req.KeyExpr)
 	if !ok {
 		s.logger.Warn("dispatch REQUEST with unknown ExprId alias",
 			"scope", req.KeyExpr.Scope)
+		s.finaliseUnmatchedQuery(req.RequestID)
 		return nil
 	}
 	ke, err := keyexpr.New(full)
 	if err != nil {
-		return fmt.Errorf("dispatch REQUEST: invalid key %q: %w", full, err)
+		// The message decoded cleanly, so the stream is still in sync. A
+		// key this client cannot parse (e.g. the $* DSL, which the grammar
+		// does not support yet) must not tear the link down — the rust
+		// client logs and continues (api/session.rs). Skip the message.
+		s.logger.Warn("dispatch REQUEST: unsupported key; skipping", "key", full, "err", err)
+		s.finaliseUnmatchedQuery(req.RequestID)
+		return nil
 	}
 	qr := QueryReceived{
 		RequestID:     req.RequestID,
@@ -84,7 +94,9 @@ func (s *Session) onRequest(req *wire.Request) error {
 			qr.Consolidation = *req.Body.Consolidation
 		}
 	}
-	s.dispatchQuery(ke, qr)
+	if s.dispatchQuery(ke, qr) == 0 {
+		s.finaliseUnmatchedQuery(req.RequestID)
+	}
 	return nil
 }
 
@@ -223,7 +235,11 @@ func (s *Session) resolveMatchingKey(w wire.WireExpr, kind MatchingKind, op stri
 	}
 	ke, err := keyexpr.New(full)
 	if err != nil {
-		return keyexpr.KeyExpr{}, fmt.Errorf("dispatch matching %s: invalid key %q: %w", op, full, err)
+		// Unsupported-but-valid-elsewhere keys (e.g. $* DSL) must not be
+		// link-fatal; skip the declaration like the rust client does.
+		s.logger.Warn("dispatch: matching entity with unsupported key; skipping",
+			"kind", kind, "op", op, "key", full, "err", err)
+		return keyexpr.KeyExpr{}, nil
 	}
 	return ke, nil
 }
@@ -237,7 +253,8 @@ func (s *Session) onTokenDeclare(d *wire.Declare, body *wire.DeclareEntity) erro
 	}
 	ke, err := keyexpr.New(full)
 	if err != nil {
-		return fmt.Errorf("dispatch D_TOKEN: invalid key %q: %w", full, err)
+		s.logger.Warn("dispatch D_TOKEN: unsupported key; skipping", "key", full, "err", err)
+		return nil
 	}
 	s.RememberInboundToken(body.EntityID, full)
 	ev := LivelinessEvent{
@@ -269,7 +286,8 @@ func (s *Session) onTokenUndeclare(body *wire.UndeclareEntity) error {
 	}
 	ke, err := keyexpr.New(full)
 	if err != nil {
-		return fmt.Errorf("dispatch U_TOKEN: invalid key %q: %w", full, err)
+		s.logger.Warn("dispatch U_TOKEN: unsupported key; skipping", "key", full, "err", err)
+		return nil
 	}
 	s.dispatchLiveliness(ke, LivelinessEvent{
 		KeyExpr:       full,
@@ -292,7 +310,8 @@ func (s *Session) onPushFromPeer(p *wire.Push, srcZID wire.ZenohID) error {
 	}
 	ke, err := keyexpr.New(full)
 	if err != nil {
-		return fmt.Errorf("dispatch PUSH: invalid key %q: %w", full, err)
+		s.logger.Warn("dispatch PUSH: unsupported key; skipping", "key", full, "err", err)
+		return nil
 	}
 
 	sample := PushSample{KeyExpr: full, ParsedKeyExpr: ke, SourceZID: srcZID}

@@ -196,6 +196,7 @@ type MulticastRuntime struct {
 	selfZID    wire.ZenohID
 	dispatch   MulticastInboundDispatch
 	maxMsgSz   int
+	snMask     uint64
 	dropped    atomic.Uint64
 	linkClosed chan struct{}
 	writerDone chan struct{}
@@ -281,7 +282,8 @@ func (s *Session) StartMulticastPeer(cfg MulticastConfig) (*MulticastRuntime, er
 
 	ctx, cancel := context.WithCancel(context.Background())
 	seeds := laneSeedsFromSNs(cfg.InitialSNs)
-	batcher := transport.NewBatcherWithLaneSeeds(int(cfg.BatchSize), true /* attachQoS */, seeds, cfg.Link.WriteBatch)
+	snMask := cfg.Resolution.Mask(wire.FieldFrameSN)
+	batcher := transport.NewBatcherWithLaneSeeds(int(cfg.BatchSize), true /* attachQoS */, seeds, snMask, cfg.Link.WriteBatch)
 	rt := &MulticastRuntime{
 		link:       cfg.Link,
 		table:      NewMulticastPeerTable(),
@@ -292,6 +294,7 @@ func (s *Session) StartMulticastPeer(cfg MulticastConfig) (*MulticastRuntime, er
 		selfZID:    cfg.ZID,
 		dispatch:   cfg.Dispatch,
 		maxMsgSz:   cfg.MaxMsgSz,
+		snMask:     snMask,
 		linkClosed: make(chan struct{}),
 		writerDone: make(chan struct{}),
 	}
@@ -381,60 +384,73 @@ func (rt *MulticastRuntime) runReadLoop(ctx context.Context, cfg MulticastConfig
 
 func (rt *MulticastRuntime) handleDatagram(cfg MulticastConfig, src *net.UDPAddr, body []byte) {
 	r := codec.NewReader(body)
-	h, err := r.DecodeHeader()
-	if err != nil {
-		rt.logger.Debug("multicast: header decode failed", "err", err)
-		return
-	}
-	switch h.ID {
-	case wire.IDTransportJoin:
-		j, err := wire.DecodeJoin(r, h)
+	for r.Len() > 0 {
+		h, err := r.DecodeHeader()
 		if err != nil {
-			rt.logger.Debug("multicast: JOIN decode failed", "err", err)
+			rt.logger.Debug("multicast: header decode failed", "err", err)
 			return
 		}
-		// Self-ZID filter: ignore our own JOINs so loopback (or a host with
-		// IP_MULTICAST_LOOP=1) does not register us as our own peer.
-		if zidEqual(j.ZID.Bytes, cfg.ZID.Bytes) {
+		switch h.ID {
+		case wire.IDTransportJoin:
+			j, err := wire.DecodeJoin(r, h)
+			if err != nil {
+				rt.logger.Debug("multicast: JOIN decode failed", "err", err)
+				return
+			}
+			// Self-ZID filter: ignore our own JOINs so loopback (or a host with
+			// IP_MULTICAST_LOOP=1) does not register us as our own peer.
+			if zidEqual(j.ZID.Bytes, cfg.ZID.Bytes) {
+				continue
+			}
+			entry, isNew := rt.table.Insert(j, src)
+			if isNew && cfg.OnPeerJoin != nil {
+				cfg.OnPeerJoin(rt, entry)
+			}
+		case wire.IDTransportKeepAlive:
+			if _, err := wire.DecodeKeepAlive(r, h); err != nil {
+				rt.logger.Debug("multicast: KEEPALIVE decode failed", "err", err)
+				return
+			}
+		case wire.IDTransportFrame:
+			entry := rt.peerForDatagram(src)
+			if entry == nil {
+				return
+			}
+			if _, err := wire.DecodeFrame(r, h); err != nil {
+				rt.logger.Debug("multicast: FRAME decode failed", "err", err, "peer", entry.ZID)
+				return
+			}
+			// The frame body ends at the first non-network header byte;
+			// the rest of the datagram continues with the next transport
+			// message (e.g. another FRAME for a different lane).
+			if !rt.dispatchMulticastFrameMessages(entry, r) {
+				return
+			}
+		case wire.IDTransportFragment:
+			entry := rt.peerForDatagram(src)
+			if entry == nil {
+				return
+			}
+			frag, err := wire.DecodeFragment(r, h)
+			if err != nil {
+				rt.logger.Debug("multicast: FRAGMENT decode failed", "err", err, "peer", entry.ZID)
+				return
+			}
+			lane := transport.LaneKey{
+				Priority: transport.LanePriorityFromExts(frag.Extensions),
+				Reliable: frag.Reliable,
+			}
+			complete := rt.pushFragment(entry, lane, frag.SeqNum, frag.More, frag.Body)
+			if complete != nil {
+				rt.dispatchMulticastFrameBody(entry, complete)
+			}
+			// FRAGMENT's body extends to the end of the datagram.
+		default:
+			// Transport OAM and other transport messages aren't part of
+			// the multicast pub/sub data path; without a length we cannot
+			// skip them, so drop the rest of the datagram quietly.
 			return
 		}
-		entry, isNew := rt.table.Insert(j, src)
-		if isNew && cfg.OnPeerJoin != nil {
-			cfg.OnPeerJoin(rt, entry)
-		}
-	case wire.IDTransportFrame:
-		entry := rt.peerForDatagram(src)
-		if entry == nil {
-			return
-		}
-		frame, err := wire.DecodeFrame(r, h)
-		if err != nil {
-			rt.logger.Debug("multicast: FRAME decode failed", "err", err, "peer", entry.ZID)
-			return
-		}
-		rt.dispatchMulticastFrameBody(entry, frame.Body)
-	case wire.IDTransportFragment:
-		entry := rt.peerForDatagram(src)
-		if entry == nil {
-			return
-		}
-		frag, err := wire.DecodeFragment(r, h)
-		if err != nil {
-			rt.logger.Debug("multicast: FRAGMENT decode failed", "err", err, "peer", entry.ZID)
-			return
-		}
-		lane := transport.LaneKey{
-			Priority: transport.LanePriorityFromExts(frag.Extensions),
-			Reliable: frag.Reliable,
-		}
-		complete := rt.pushFragment(entry, lane, frag.SeqNum, frag.More, frag.Body)
-		if complete != nil {
-			rt.dispatchMulticastFrameBody(entry, complete)
-		}
-	default:
-		// Transport OAM and other transport messages aren't part of
-		// the multicast pub/sub data path; drop quietly.
-		return
 	}
 }
 
@@ -464,7 +480,7 @@ func (rt *MulticastRuntime) pushFragment(entry *MulticastPeerEntry, lane transpo
 	entry.reasmMu.Lock()
 	defer entry.reasmMu.Unlock()
 	if entry.reasm == nil {
-		entry.reasm = transport.NewReassembler(rt.maxMsgSz)
+		entry.reasm = transport.NewReassembler(rt.maxMsgSz, rt.snMask)
 	}
 	complete, err := entry.reasm.Push(lane, sn, more, body)
 	if err != nil {
@@ -475,12 +491,50 @@ func (rt *MulticastRuntime) pushFragment(entry *MulticastPeerEntry, lane transpo
 	return complete
 }
 
+// dispatchMulticastFrameMessages decodes NetworkMessages from the datagram
+// reader until it is exhausted or the next header byte is not a network
+// message (where the next transport message of the datagram starts).
+// Returns false when the rest of the datagram must be dropped (decode or
+// dispatch failure). The unicast equivalent is reader.go:
+// dispatchFrameMessages; we keep a parallel implementation here so the
+// multicast Dispatch signature can carry srcZID without changing the
+// unicast one.
+func (rt *MulticastRuntime) dispatchMulticastFrameMessages(entry *MulticastPeerEntry, r *codec.Reader) bool {
+	if rt.dispatch == nil {
+		return false
+	}
+	for r.Len() > 0 {
+		b, err := r.PeekByte()
+		if err != nil {
+			return false
+		}
+		if !wire.IsNetworkMessageID(b & codec.HdrIDMask) {
+			return true
+		}
+		h, err := r.DecodeHeader()
+		if err != nil {
+			rt.logger.Debug("multicast: network header decode failed",
+				"err", err, "peer", entry.ZID)
+			return false
+		}
+		before := r.Len()
+		if err := rt.dispatch(entry.ZID, h, r); err != nil {
+			rt.logger.Debug("multicast: dispatch failed",
+				"err", err, "peer", entry.ZID, "msg_id", h.ID)
+			return false
+		}
+		if r.Len() > 0 && r.Len() == before {
+			rt.logger.Warn("multicast: dispatch did not consume body bytes; dropping rest",
+				"peer", entry.ZID, "msg_id", h.ID)
+			return false
+		}
+	}
+	return true
+}
+
 // dispatchMulticastFrameBody walks the self-delimiting NetworkMessage
-// chain inside a FRAME body (or fully-reassembled FRAGMENT chain) and
-// hands each one to the configured Dispatch with the source peer's
-// ZID. The unicast equivalent is reader.go:dispatchFrameBody; we keep
-// a parallel implementation here so the multicast Dispatch signature
-// can carry srcZID without changing the unicast one.
+// chain inside a fully-reassembled FRAGMENT chain and hands each one to
+// the configured Dispatch with the source peer's ZID.
 func (rt *MulticastRuntime) dispatchMulticastFrameBody(entry *MulticastPeerEntry, body []byte) {
 	if rt.dispatch == nil {
 		return

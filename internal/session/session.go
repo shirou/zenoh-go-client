@@ -59,6 +59,30 @@ type Session struct {
 	// can drive multiple parallel handshakes against different peers
 	// without one runtime's Active state blocking the next handshake.
 	multiRuntime bool
+
+	// unmatchedQueryFn is invoked for an inbound REQUEST that no local
+	// queryable handles (no intersection, or an unsupported key). The
+	// public layer replies with RESPONSE_FINAL so the remote querier
+	// completes instead of waiting for its timeout.
+	unmatchedQueryMu sync.RWMutex
+	unmatchedQueryFn func(requestID uint32)
+}
+
+// SetUnmatchedQueryHandler registers the callback used to finalise inbound
+// queries that reach no queryable.
+func (s *Session) SetUnmatchedQueryHandler(fn func(requestID uint32)) {
+	s.unmatchedQueryMu.Lock()
+	s.unmatchedQueryFn = fn
+	s.unmatchedQueryMu.Unlock()
+}
+
+func (s *Session) finaliseUnmatchedQuery(requestID uint32) {
+	s.unmatchedQueryMu.RLock()
+	fn := s.unmatchedQueryFn
+	s.unmatchedQueryMu.RUnlock()
+	if fn != nil {
+		fn(requestID)
+	}
 }
 
 // Option configures a Session at construction time.

@@ -73,6 +73,10 @@ func (s *Session) DeclareQueryable(keyExpr KeyExpr, handler QueryHandler, opts *
 		case inQ <- qr:
 		default:
 			slog.Default().Warn("zenoh: queryable dispatcher queue full, dropping query")
+			// The dropped delivery still owes its share of the request's
+			// completion, or the final is never sent and the remote
+			// querier hangs for its full timeout.
+			s.finishQuery(qr)
 		}
 	}
 	complete := opts != nil && opts.Complete
@@ -111,11 +115,12 @@ func (q *Queryable) Drop() {
 	}
 }
 
-// runQueryHandler invokes the user handler for one query, then emits
-// RESPONSE_FINAL. Panics in the user handler, ReplyErr, or sendFinal are
-// all recovered independently so a single failure can't prevent the
-// RESPONSE_FINAL from being attempted and can't kill the dispatcher
-// goroutine for subsequent queries.
+// runQueryHandler invokes the user handler for one query, then settles the
+// query's share of the request completion (the RESPONSE_FINAL goes out when
+// the last matching queryable finishes). Panics in the user handler,
+// ReplyErr, or the final are all recovered independently so a single
+// failure can't prevent the RESPONSE_FINAL from being attempted and can't
+// kill the dispatcher goroutine for subsequent queries.
 func (s *Session) runQueryHandler(handler QueryHandler, qr session.QueryReceived) {
 	query := buildQuery(s, qr)
 
@@ -133,12 +138,22 @@ func (s *Session) runQueryHandler(handler QueryHandler, qr session.QueryReceived
 		handler(query)
 	}()
 
-	// RESPONSE_FINAL in its own recover boundary.
-	safeCall(func() {
-		if err := query.sendFinal(); err != nil {
-			slog.Default().Warn("zenoh: RESPONSE_FINAL send failed", "err", err)
-		}
-	})
+	// Completion accounting in its own recover boundary.
+	safeCall(func() { s.finishQuery(qr) })
+}
+
+// finishQuery marks one delivery of the request as handled and emits
+// RESPONSE_FINAL when it was the last outstanding one. A query dispatched
+// to several overlapping queryables must produce exactly one final — the
+// router closes the request on the first final it sees and would discard
+// the remaining queryables' replies.
+func (s *Session) finishQuery(qr session.QueryReceived) {
+	if !qr.QueryDone() {
+		return
+	}
+	if err := s.sendResponseFinal(qr.RequestID); err != nil {
+		slog.Default().Warn("zenoh: RESPONSE_FINAL send failed", "err", err)
+	}
 }
 
 // safeCall runs f with a recover() boundary that logs any panic. Used on
@@ -185,9 +200,10 @@ func (s *Session) sendUndeclareQueryable(id uint32, keyExpr KeyExpr) error {
 }
 
 // queryableInfoExt builds the QueryableInfo extension (Z64, id=0x01,
-// M=false). Z64 payload layout: bit 0 = Complete; bits 17:1 = distance.
+// M=false). Z64 payload layout: flags in the low byte (bit 0 = Complete),
+// distance in bits 8 and above (zenoh-codec declare.rs, QueryableInfoType).
 func queryableInfoExt(complete bool, distance uint16) codec.Extension {
-	var v uint64 = uint64(distance) << 1
+	var v uint64 = uint64(distance) << 8
 	if complete {
 		v |= 1
 	}

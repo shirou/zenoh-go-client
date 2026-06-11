@@ -225,14 +225,16 @@ func (b *Batcher) openFrame(l *lane) error {
 // flushLocked writes l.batch to the sink if it has a non-empty body, then
 // resets. Must be called with b.mu held.
 func (b *Batcher) flushLocked(l *lane) error {
-	if len(l.batch) == l.bodyStart {
+	if len(l.batch) == 0 || len(l.batch) == l.bodyStart {
 		// No FRAME open, or opened with no body bytes appended.
 		l.batch = l.batch[:0]
+		l.bodyStart = 0
 		return nil
 	}
 	err := b.sink(l.batch)
 	l.seqNum++
 	l.batch = l.batch[:0]
+	l.bodyStart = 0
 	return err
 }
 

@@ -87,6 +87,33 @@ func TestBatcherSeqNumIncrements(t *testing.T) {
 	}
 }
 
+// TestBatcherIdleFlushEmitsNothing: once a lane has flushed, further
+// FlushAll calls with nothing queued must neither write to the sink nor
+// burn a sequence number. (Regression: a stale bodyStart after the first
+// flush made every subsequent flush emit a zero-length batch.)
+func TestBatcherIdleFlushEmitsNothing(t *testing.T) {
+	b, out := newCapturingBatcher(t, 256, true)
+
+	body := []byte{0x01}
+	_ = b.Enqueue(&OutboundMessage{Encoded: body, Priority: wire.QoSPriorityData, Reliable: true})
+	_ = b.FlushAll()
+	_ = b.FlushAll()
+	_ = b.FlushAll()
+
+	if len(*out) != 1 {
+		t.Fatalf("expected 1 flush, got %d", len(*out))
+	}
+
+	// The next real message must use the very next seq_num.
+	_ = b.Enqueue(&OutboundMessage{Encoded: body, Priority: wire.QoSPriorityData, Reliable: true})
+	_ = b.FlushAll()
+	sn1 := mustReadFrameSN(t, (*out)[0].bytes)
+	sn2 := mustReadFrameSN(t, (*out)[1].bytes)
+	if sn2 != sn1+1 {
+		t.Errorf("seq_num: %d then %d, want increment by exactly 1", sn1, sn2)
+	}
+}
+
 // TestBatcherLanesIndependent: two priorities on the same reliability
 // produce two separate FRAMEs, each with its own seq_num.
 func TestBatcherLanesIndependent(t *testing.T) {

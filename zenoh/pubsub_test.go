@@ -256,11 +256,10 @@ func (m *mockRouter) processBatch(conn net.Conn, batch []byte) {
 		}
 		switch h.ID {
 		case wire.IDTransportFrame:
-			frame, err := wire.DecodeFrame(r, h)
-			if err != nil {
+			if _, err := wire.DecodeFrame(r, h); err != nil {
 				return
 			}
-			m.processFrameBody(frame.Body)
+			m.processFrameBody(r.Bytes())
 			return
 		case wire.IDTransportKeepAlive:
 			_, _ = wire.DecodeKeepAlive(r, h)

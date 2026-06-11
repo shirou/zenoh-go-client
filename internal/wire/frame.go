@@ -15,24 +15,22 @@ import (
 //	header
 //	seq_num z64 (resolution-dependent width; we carry as u64)
 //	[extensions]        — QoS priority lane is the canonical extension
-//	{NetworkMessage...} — back-to-back serialised NetworkMessages fill the rest
+//	{NetworkMessage...} — back-to-back serialised NetworkMessages follow
 //
-// The body bytes after the extension chain are *not* consumed by Frame. The
-// caller decides how to iterate NetworkMessages; Frame exposes them via Body.
-//
-// FRAME is assumed to consume the rest of the enclosing stream batch — per
-// spec `batching.adoc`, a batch contains self-delimiting NetworkMessages
-// back-to-back, and there is no trailing transport message after the FRAME
-// body within a single batch.
+// A FRAME does not necessarily extend to the end of the enclosing batch: the
+// reference transport opens a new FRAME mid-batch whenever the reliability or
+// priority of the next message differs, and other transport messages
+// (KEEPALIVE, CLOSE) may follow (zenoh-codec transport/batch.rs). The frame
+// body ends at the first header byte that is not a NetworkMessage; the caller
+// iterates messages and detects that boundary (network and transport IDs
+// occupy disjoint ranges).
 type Frame struct {
 	Reliable   bool
 	SeqNum     uint64
 	Extensions []codec.Extension
-	// Body is the remaining bytes after the header/seq/extensions.
-	//
-	// The slice aliases the parent decoder's buffer (which is usually a
-	// reader reading into a reusable batch buffer). Callers MUST finish
-	// parsing Body before the next batch read, or copy the bytes.
+	// Body holds the NetworkMessage bytes to serialise after the
+	// header/seq/extensions when encoding. DecodeFrame does NOT populate
+	// it — the body stays in the reader for the caller to iterate.
 	Body []byte
 }
 
@@ -53,9 +51,11 @@ func (m *Frame) EncodeTo(w *codec.Writer) error {
 	return nil
 }
 
-// DecodeFrame reads a FRAME and sets Body to the remaining bytes of the
-// enclosing batch. The caller is expected to have wrapped a sub-reader
-// covering just this batch.
+// DecodeFrame reads a FRAME header, sequence number, and extension chain,
+// leaving the reader positioned at the first NetworkMessage of the frame
+// body. The caller iterates messages until the batch is exhausted or the
+// next header byte is not a network message ID (the next transport message
+// of the batch starts there).
 func DecodeFrame(r *codec.Reader, h codec.Header) (*Frame, error) {
 	if h.ID != IDTransportFrame {
 		return nil, fmt.Errorf("wire: expected FRAME header, got id=%#x", h.ID)
@@ -70,8 +70,5 @@ func DecodeFrame(r *codec.Reader, h codec.Header) (*Frame, error) {
 			return nil, fmt.Errorf("FRAME extensions: %w", err)
 		}
 	}
-	m.Body = r.Bytes()
-	// Consume the body from the reader so subsequent reads see EOF.
-	_ = r.Skip(r.Len())
 	return m, nil
 }

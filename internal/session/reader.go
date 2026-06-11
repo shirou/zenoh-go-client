@@ -113,15 +113,16 @@ func processBatch(cfg ReaderConfig, batch []byte) error {
 			}
 			return nil
 		case wire.IDTransportFrame:
-			frame, err := wire.DecodeFrame(r, h)
-			if err != nil {
+			if _, err := wire.DecodeFrame(r, h); err != nil {
 				return fmt.Errorf("FRAME: %w", err)
 			}
-			if err := dispatchFrameBody(cfg, frame.Body); err != nil {
+			if err := dispatchFrameMessages(cfg, r); err != nil {
 				return err
 			}
-			// FRAME consumed the rest of the batch by contract.
-			return nil
+			// Keep iterating: the frame body ended at the first
+			// transport-range header byte. The peer opens a new FRAME
+			// mid-batch when reliability or priority changes, and may
+			// append KEEPALIVE / CLOSE after it.
 		case wire.IDTransportFragment:
 			frag, err := wire.DecodeFragment(r, h)
 			if err != nil {
@@ -143,7 +144,8 @@ func processBatch(cfg ReaderConfig, batch []byte) error {
 					return err
 				}
 			}
-			return nil
+			// FRAGMENT's body extends to the end of the batch, so the
+			// loop terminates on the next iteration.
 		case wire.IDTransportOAM:
 			// Transport OAM not yet decoded. Without a length we can't
 			// reliably find the next message in the batch, so treat as a
@@ -156,11 +158,19 @@ func processBatch(cfg ReaderConfig, batch []byte) error {
 	return nil
 }
 
-// dispatchFrameBody iterates self-delimiting NetworkMessages inside a FRAME
-// body and hands each off to the inbound Dispatch callback.
-func dispatchFrameBody(cfg ReaderConfig, body []byte) error {
-	r := codec.NewReader(body)
+// dispatchFrameMessages decodes NetworkMessages from the batch reader until
+// the batch is exhausted or the next header byte is not a network message —
+// the following transport message of the same batch (e.g. a new FRAME for a
+// different reliability/priority lane) starts there.
+func dispatchFrameMessages(cfg ReaderConfig, r *codec.Reader) error {
 	for r.Len() > 0 {
+		b, err := r.PeekByte()
+		if err != nil {
+			return err
+		}
+		if !wire.IsNetworkMessageID(b & codec.HdrIDMask) {
+			return nil
+		}
 		h, err := r.DecodeHeader()
 		if err != nil {
 			return fmt.Errorf("network header: %w", err)
@@ -173,6 +183,28 @@ func dispatchFrameBody(cfg ReaderConfig, body []byte) error {
 		// we'd loop forever on the same header. Empty-body messages
 		// legitimately leave r.Len() == 0 here, so only error when there
 		// are unread bytes.
+		if r.Len() > 0 && r.Len() == before {
+			return fmt.Errorf("dispatch did not consume network message id=%#x", h.ID)
+		}
+	}
+	return nil
+}
+
+// dispatchFrameBody iterates self-delimiting NetworkMessages inside a fully
+// reassembled FRAGMENT chain. Unlike a FRAME body inside a batch, the buffer
+// contains nothing but NetworkMessages, so a non-network header byte is
+// corruption rather than a frame boundary.
+func dispatchFrameBody(cfg ReaderConfig, body []byte) error {
+	r := codec.NewReader(body)
+	for r.Len() > 0 {
+		h, err := r.DecodeHeader()
+		if err != nil {
+			return fmt.Errorf("network header: %w", err)
+		}
+		before := r.Len()
+		if err := cfg.Dispatch(h, r); err != nil {
+			return err
+		}
 		if r.Len() > 0 && r.Len() == before {
 			return fmt.Errorf("dispatch did not consume network message id=%#x", h.ID)
 		}

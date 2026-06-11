@@ -245,8 +245,10 @@ type livelinessSubReplayState struct {
 // LivelinessGetOptions controls Session.Liveliness().Get.
 type LivelinessGetOptions struct {
 	// Timeout bounds how long the caller waits for replies. Zero means
-	// no client-side limit; a hung router will keep the Get open until
-	// the session closes.
+	// the 10 s default (mirroring the reference's
+	// queries_default_timeout); pass a negative value for no client-side
+	// limit, in which case a hung router keeps the Get open until the
+	// session closes.
 	Timeout time.Duration
 	// Buffer is the reply-channel capacity; 0 → default 16.
 	Buffer int
@@ -275,15 +277,14 @@ func (l *Liveliness) GetWithContext(ctx context.Context, keyExpr KeyExpr, opts *
 	}
 
 	bufSize := 16
-	var timeout time.Duration
+	var optTimeout time.Duration
 	if opts != nil {
 		if opts.Buffer > 0 {
 			bufSize = opts.Buffer
 		}
-		if opts.Timeout > 0 {
-			timeout = opts.Timeout
-		}
+		optTimeout = opts.Timeout
 	}
+	timeout := effectiveQueryTimeout(optTimeout)
 
 	id := s.inner.IDs().AllocInterestID()
 	inboundCh := s.inner.RegisterLivelinessQuery(id, bufSize)

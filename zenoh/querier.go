@@ -18,7 +18,9 @@ type QuerierOptions struct {
 	HasTarget        bool
 	Consolidation    ConsolidationMode
 	HasConsolidation bool
-	Timeout          time.Duration // default per-Get timeout; 0 = unbounded
+	// Timeout is the default per-Get timeout; 0 = the 10 s session
+	// default, negative = unbounded (see GetOptions.Timeout).
+	Timeout time.Duration
 }
 
 // QuerierGetOptions overrides a subset of the Querier's defaults for one
@@ -136,7 +138,7 @@ func (q *Querier) mergeGetOptions(call *QuerierGetOptions) *GetOptions {
 	if call.HasTarget {
 		out.Target, out.HasTarget = call.Target, true
 	}
-	if call.Timeout > 0 {
+	if call.Timeout != 0 {
 		out.Timeout = call.Timeout
 	}
 	if call.Budget > 0 {

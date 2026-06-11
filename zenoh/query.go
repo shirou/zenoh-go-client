@@ -87,17 +87,17 @@ func (q *Query) sendResponse(keyExpr KeyExpr, body wire.ResponseBody) error {
 	return q.session.enqueueNetwork(context.Background(), res, wire.QoSPriorityData, true, false)
 }
 
-// sendFinal emits RESPONSE_FINAL for this query.
+// sendResponseFinal emits RESPONSE_FINAL for an inbound request.
 //
 // MUST share the Data priority lane with the preceding REPLYs — otherwise
 // the router's flush-by-priority ordering places RESPONSE_FINAL on a
 // different FRAME stream and it overtakes the replies, so the querier sees
 // "final without replies".
-func (q *Query) sendFinal() error {
+func (s *Session) sendResponseFinal(requestID uint32) error {
 	// Same rationale as sendResponse: fires inside the dispatch callback
 	// after the handler returns, no caller ctx.
-	rf := &wire.ResponseFinal{RequestID: q.requestID}
-	return q.session.enqueueNetwork(context.Background(), rf, wire.QoSPriorityData, true, false)
+	rf := &wire.ResponseFinal{RequestID: requestID}
+	return s.enqueueNetwork(context.Background(), rf, wire.QoSPriorityData, true, false)
 }
 
 func encodingFromOpts(opts *QueryReplyOptions) *wire.Encoding {

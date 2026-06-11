@@ -2,6 +2,7 @@ package session
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"github.com/shirou/zenoh-go-client/internal/keyexpr"
 	"github.com/shirou/zenoh-go-client/internal/wire"
@@ -16,6 +17,25 @@ type QueryReceived struct {
 	ParsedKeyExpr keyexpr.KeyExpr
 	Parameters    string
 	Consolidation wire.ConsolidationMode
+
+	// remaining counts deliveries of this request still outstanding across
+	// every matching queryable. Shared by all copies handed out for one
+	// REQUEST; see QueryDone.
+	remaining *atomic.Int32
+}
+
+// QueryDone records that one delivered copy of the query has been fully
+// handled and reports whether it was the last one. RESPONSE_FINAL must be
+// sent exactly once per request — after the last matching queryable
+// finishes — or the router closes the query early and discards the
+// remaining queryables' replies (rust queryable.rs sends the final when the
+// last Query clone drops). A QueryReceived that never went through
+// dispatchQuery has no counter and counts as last.
+func (q *QueryReceived) QueryDone() bool {
+	if q.remaining == nil {
+		return true
+	}
+	return q.remaining.Add(-1) == 0
 }
 
 // QueryDeliverFn is the callback a queryable registers to handle inbound
@@ -72,14 +92,28 @@ func (s *Session) UnregisterQueryable(id uint32) {
 }
 
 // dispatchQuery routes an inbound REQUEST to every queryable whose key
-// expression intersects.
-func (s *Session) dispatchQuery(queryKE keyexpr.KeyExpr, q QueryReceived) {
+// expression intersects, arming the shared QueryDone counter so the public
+// layer can emit exactly one RESPONSE_FINAL after the last handler
+// finishes. Returns the number of queryables the query was delivered to;
+// the caller must finalise the request itself when that is zero, or the
+// remote querier hangs until its timeout.
+func (s *Session) dispatchQuery(queryKE keyexpr.KeyExpr, q QueryReceived) int {
 	reg := s.regQueryables()
 	reg.mu.RLock()
 	defer reg.mu.RUnlock()
+	var matched []*queryableEntry
 	for _, qbl := range reg.byID {
 		if qbl.keyExpr.Intersects(queryKE) {
-			qbl.deliver(q)
+			matched = append(matched, qbl)
 		}
 	}
+	if len(matched) == 0 {
+		return 0
+	}
+	q.remaining = &atomic.Int32{}
+	q.remaining.Store(int32(len(matched)))
+	for _, qbl := range matched {
+		qbl.deliver(q)
+	}
+	return len(matched)
 }

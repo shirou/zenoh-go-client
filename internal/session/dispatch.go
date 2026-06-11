@@ -61,12 +61,16 @@ func (s *Session) NetworkDispatcherForPeer(peerZID wire.ZenohID) InboundDispatch
 	}
 }
 
-// onRequest routes an inbound REQUEST to every matching queryable.
+// onRequest routes an inbound REQUEST to every matching queryable. A
+// request that reaches no queryable is finalised immediately so the remote
+// querier completes instead of waiting for its timeout (rust session.rs
+// handle_query drops the Query right away, which sends the final).
 func (s *Session) onRequest(req *wire.Request) error {
 	full, ok := s.resolveRemoteKey(req.KeyExpr)
 	if !ok {
 		s.logger.Warn("dispatch REQUEST with unknown ExprId alias",
 			"scope", req.KeyExpr.Scope)
+		s.finaliseUnmatchedQuery(req.RequestID)
 		return nil
 	}
 	ke, err := keyexpr.New(full)
@@ -76,6 +80,7 @@ func (s *Session) onRequest(req *wire.Request) error {
 		// does not support yet) must not tear the link down — the rust
 		// client logs and continues (api/session.rs). Skip the message.
 		s.logger.Warn("dispatch REQUEST: unsupported key; skipping", "key", full, "err", err)
+		s.finaliseUnmatchedQuery(req.RequestID)
 		return nil
 	}
 	qr := QueryReceived{
@@ -89,7 +94,9 @@ func (s *Session) onRequest(req *wire.Request) error {
 			qr.Consolidation = *req.Body.Consolidation
 		}
 	}
-	s.dispatchQuery(ke, qr)
+	if s.dispatchQuery(ke, qr) == 0 {
+		s.finaliseUnmatchedQuery(req.RequestID)
+	}
 	return nil
 }
 

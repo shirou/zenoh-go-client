@@ -142,6 +142,14 @@ func Open(ctx context.Context, cfg Config) (*Session, error) {
 		livelinessSubsReplay: make(map[uint32]livelinessSubReplayState),
 	}
 
+	// An inbound query that reaches no local queryable still needs its
+	// RESPONSE_FINAL, or the remote querier waits out its full timeout.
+	inner.SetUnmatchedQueryHandler(func(requestID uint32) {
+		if err := s.sendResponseFinal(requestID); err != nil {
+			inner.Logger().Warn("zenoh: RESPONSE_FINAL for unmatched query failed", "err", err)
+		}
+	})
+
 	if cfg.Mode == ModePeer {
 		if err := s.openPeer(ctx); err != nil {
 			_ = inner.Close()

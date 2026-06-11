@@ -81,8 +81,8 @@ func DoHandshakeResponder(link transport.Link, cfg AcceptConfig) (*HandshakeResu
 		negBatch = initSyn.BatchSize
 	}
 	negResolution := cfg.Resolution
-	if initSyn.HasSizeInfo && initSyn.Resolution.Bits(wire.FieldFrameSN) < cfg.Resolution.Bits(wire.FieldFrameSN) {
-		negResolution = initSyn.Resolution
+	if initSyn.HasSizeInfo {
+		negResolution = wire.MinResolution(cfg.Resolution, initSyn.Resolution)
 	}
 
 	// QoS is bidirectional: we echo the QoS Unit ext only when both sides
